@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useCallback, useEffect } from 'react'
-import { Rocket, Briefcase, Calendar, Globe, ChevronDown, ChevronUp, GraduationCap } from 'lucide-react'
+import { Rocket, Briefcase, Calendar, Globe, ChevronDown, ChevronUp } from 'lucide-react'
 import { motion } from 'framer-motion'
 import confetti from 'canvas-confetti'
 import { Button } from "@/components/ui/button"
@@ -246,7 +246,7 @@ const AutoApply: React.FC = () => {
   const [jobBoards, setJobBoards] = useState<JobBoards>(
     Object.fromEntries(CONFIG.ALL_JOB_BOARDS.map(board => [board, { enabled: false, limit: 0 }]))
   );
-  const [userLimit, setUserLimit] = useState(10);
+  const [userLimit] = useState(10);
   const [jobFilters, setJobFilters] = useState<JobFilters>({
     experienceLevel: '',
     jobType: [],
