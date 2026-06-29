@@ -1,5 +1,6 @@
-import { MessageType } from '../messages';
-import { chatSession } from '../../lib/GeminiAi';
+import { MessageType } from '../lib/status-codes';
+import { ProviderFactory } from '../lib/ai';
+import type { AIProvider } from '../lib/ai';
 import { delay } from './utils';
 import { createPDFFromURL } from './pdfUtils';
 
@@ -15,17 +16,29 @@ type JobDetail = {
 }
 
 let jobDetails: JobDetail;
-let resumeText: string;
 let tabId: number;
 let filledFields: Set<string> = new Set();
 let fileUploadAttempts: Map<string, number> = new Map();
-let lastInteractionTime = 0;
-let isProcessingForm = false;
 
 const MAX_ATTEMPTS = 5;
 let attemptCount = 0;
 const MAX_EXECUTION_TIME = 300000;
 let startTime: number;
+
+// AI 提供商实例
+let aiProvider: AIProvider;
+
+// 初始化 AI 提供商
+async function initAIProvider(): Promise<void> {
+    try {
+        const config = await ProviderFactory.loadConfig();
+        aiProvider = ProviderFactory.create(config);
+        console.log('AI 提供商初始化成功:', config.modelName);
+    } catch (error) {
+        console.error('AI 提供商初始化失败:', error);
+        aiProvider = ProviderFactory.createDefault();
+    }
+}
 
 
 async function handleJobApplication() {
@@ -169,7 +182,7 @@ async function findSubmitButtonInContainer(container: Element): Promise<HTMLElem
             Respond with only YES or NO.
         `);
 
-        if (aiResponse.trim().toUpperCase() === 'YES') {
+        if (aiResponse?.trim().toUpperCase() === 'YES') {
             console.log("AI confirmed submit button:", button);
             return button as HTMLElement;
         }
@@ -191,7 +204,7 @@ async function findApplicationForm(): Promise<HTMLFormElement | null> {
             Respond with only YES or NO.
         `);
 
-        if (aiResponse.trim().toUpperCase() === 'YES') {
+        if (aiResponse?.trim().toUpperCase() === 'YES') {
             console.log("AI confirmed job application form:", form);
             return form;
         }
@@ -270,7 +283,7 @@ async function findApplyButtons(): Promise<HTMLElement[]> {
         Otherwise, respond with the index of the most appropriate button and a brief explanation of why you chose it.
     `);
 
-    const result = aiResponse.trim().split('\n')[0];  // Get the first line of the response
+    const result = aiResponse?.trim().split('\n')[0] ?? '';  // Get the first line of the response
     if (result === 'NONE') {
         console.log("No suitable 'Apply for roles' button found");
         return [];
@@ -283,7 +296,7 @@ async function findApplyButtons(): Promise<HTMLElement[]> {
     }
 
     console.log("AI confirmed 'Apply for roles' button:", potentialButtons[buttonIndex]);
-    console.log("AI explanation:", aiResponse.trim().split('\n').slice(1).join('\n'));
+    console.log("AI explanation:", aiResponse?.trim().split('\n').slice(1).join('\n'));
     return [potentialButtons[buttonIndex]];
 }
 
@@ -349,7 +362,7 @@ async function handleElement(element: Element) {
     const aiResponse = await queryLLM(prompt);
     console.log(`LLM response for element ${identifier}:`, aiResponse);
 
-    if (aiResponse.startsWith('YES|')) {
+    if (aiResponse?.startsWith('YES|')) {
         const value = aiResponse.split('|')[1];
         console.log(`Attempting to fill element ${identifier} with value:`, value);
         await fillElement(element, value);
@@ -480,7 +493,7 @@ async function findUploadButton(fileInput: HTMLInputElement): Promise<HTMLElemen
             Respond with only YES or NO.
         `);
 
-        if (aiResponse.trim().toUpperCase() === 'YES') {
+        if (aiResponse?.trim().toUpperCase() === 'YES') {
             console.log("AI confirmed upload button:", button);
             return button as HTMLElement;
         }
@@ -549,7 +562,7 @@ async function findSubmitButton(form: HTMLFormElement): Promise<HTMLElement | nu
             Respond with only YES or NO.
         `);
 
-        if (aiResponse.trim().toUpperCase() === 'YES') {
+        if (aiResponse?.trim().toUpperCase() === 'YES') {
             console.log("AI confirmed submit button:", button);
             return button as HTMLElement;
         }
@@ -622,7 +635,7 @@ function isVisibleElement(element: Element): boolean {
         case 'radio':
           return element.checked;
         case 'file':
-          return element.files && element.files.length > 0;
+          return !!(element.files && element.files.length > 0);
         default:
           return element.value.trim() !== '';
       }
@@ -704,14 +717,16 @@ function isVisibleElement(element: Element): boolean {
     console.warn(`No matching option found for "${value}" in ${selectElement.name}`);
   }
   
-  let totalToken = 0;
   async function queryLLM(prompt: string) {
     try {
-      const result = await chatSession.sendMessage(prompt);
-      const response = result.response.text().trim();
-      totalToken = result.response.usageMetadata?.totalTokenCount || 0;
-      console.log('Total tokens used:', totalToken);
-      return cleanResponse(response);
+      if (!aiProvider) {
+        await initAIProvider();
+      }
+
+      const response = await aiProvider.sendMessage(prompt);
+      const trimmedResponse = response.trim();
+      console.log('AI 响应:', trimmedResponse);
+      return cleanResponse(trimmedResponse);
     } catch (error) {
       console.error('Error querying LLM:', error);
       return null;
@@ -725,10 +740,9 @@ function isVisibleElement(element: Element): boolean {
  
   chrome.runtime.sendMessage({ action: 'contentScriptReady' });
   
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if(message.action === 'sendData') {
       jobDetails = message.jobDetails;
-      resumeText = message.resumeText;
       tabId = message.tabId;
 
       console.log("Received data in new tab:", jobDetails);

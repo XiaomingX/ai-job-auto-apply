@@ -11,8 +11,8 @@ export async function openJobTab(jobUrl: string): Promise<void> {
 
   try {
       const jobTab = await chrome.tabs.create({ url: jobUrl });
-      await chrome.tabs.update(jobTab.id, { active: true }); // Activate the newly created tab
-      if (currentTab.length > 0) {
+      await chrome.tabs.update(jobTab.id!, { active: true }); // Activate the newly created tab
+      if (currentTab.length > 0 && currentTab[0].id) {
           await chrome.tabs.remove(currentTab[0].id); // Close the current tab if it exists
       }
       chrome.runtime.sendMessage({ type: 'tabLoaded' });

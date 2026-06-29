@@ -1,10 +1,13 @@
-import { MessageType } from '../messages';
-import { chatSession } from '../../lib/GeminiAi';
+import { MessageType } from '../lib/status-codes';
+import { ProviderFactory } from '../lib/ai';
+import type { AIProvider } from '../lib/ai';
 import { delay } from './utils';
 import extractTextFromPDF from "pdf-parser-client-side";
 import { createPDFFromURL } from './pdfUtils';
+import { Mutex } from '../lib/concurrency';
+import type { WorkExperience, Education } from '../domain/models';
 
-import {selectors} from './selectors' 
+import {selectors} from './selectors'
 
 interface JobDetail {
     fullName: string,
@@ -20,14 +23,6 @@ interface JobDetail {
     workAddress?: string;
 }
 
-let jobDetails: JobDetail;
-
-let aiResponse: string;
-let allText: string = "";
-let resumeText: string = "";
-let userId: number;
-let applicationLimit: number;
-
 interface FormField {
     id: string;
     type: string;
@@ -37,17 +32,149 @@ interface FormField {
     required: boolean;
     options: string[] | null;
     element: HTMLElement;
-  }
+}
 
+// AI 请求超时时间（毫秒）
+const AI_REQUEST_TIMEOUT = 30000;
 
+// 状态管理器（替代全局变量）
+class ApplicationStateManager {
+    private state = {
+        jobDetails: null as JobDetail | null,
+        aiResponse: '',
+        allText: '',
+        resumeText: '',
+        userId: '',
+        applicationLimit: 0,
+        totalToken: 0,
+        workExperiences: [] as any[],
+        educations: [] as any[],
+    };
+
+    reset() {
+        this.state = {
+            jobDetails: null,
+            aiResponse: '',
+            allText: '',
+            resumeText: '',
+            userId: this.state.userId, // 保留 userId
+            applicationLimit: 0,
+            totalToken: 0,
+            workExperiences: [],
+            educations: [],
+        };
+    }
+
+    get() {
+        return this.state;
+    }
+
+    update(partial: Partial<typeof this.state>) {
+        this.state = { ...this.state, ...partial };
+        this.saveToPersistence();
+    }
+
+    // 保存到本地持久化存储
+    private async saveToPersistence(): Promise<void> {
+        try {
+            await chrome.storage.local.set({
+                'linkedin-app-state': {
+                    userId: this.state.userId,
+                    applicationLimit: this.state.applicationLimit,
+                    totalToken: this.state.totalToken,
+                    lastUpdated: Date.now(),
+                }
+            });
+        } catch (error) {
+            console.error('保存状态失败:', error);
+        }
+    }
+
+    // 从本地持久化存储加载
+    async loadFromPersistence(): Promise<void> {
+        try {
+            const result = await chrome.storage.local.get('linkedin-app-state');
+            if (result['linkedin-app-state']) {
+                const saved = result['linkedin-app-state'];
+                this.state = {
+                    ...this.state,
+                    userId: saved.userId || '',
+                    applicationLimit: saved.applicationLimit || 0,
+                    totalToken: saved.totalToken || 0,
+                };
+                console.log('已加载持久化状态:', saved);
+            }
+        } catch (error) {
+            console.error('加载持久化状态失败:', error);
+        }
+    }
+}
+
+const appState = new ApplicationStateManager();
+
+// 错误报告器
+class ErrorReporter {
+    private errors: Array<{ timestamp: number; context: string; error: string; recovered: boolean }> = [];
+
+    report(context: string, error: Error | string, recovered: boolean = false) {
+        const entry = {
+            timestamp: Date.now(),
+            context,
+            error: error instanceof Error ? error.message : error,
+            recovered,
+        };
+        this.errors.push(entry);
+        console.error(`[${recovered ? '已恢复' : '失败'}] ${context}:`, entry.error);
+
+        // 通知 background
+        chrome.runtime.sendMessage({
+            type: 'ERROR_REPORT',
+            ...entry,
+        }).catch(() => {}); // 静默处理发送失败
+    }
+
+    getErrors() {
+        return [...this.errors];
+    }
+}
+
+const errorReporter = new ErrorReporter();
+
+// 并发锁，防止重复启动申请流程
+const processLock = new Mutex();
+
+// AI 提供商实例
+let aiProvider: AIProvider;
+
+// 初始化 AI 提供商
+async function initAIProvider(): Promise<void> {
+    try {
+        const config = await ProviderFactory.loadConfig();
+        aiProvider = ProviderFactory.create(config);
+        console.log('AI 提供商初始化成功:', config.modelName);
+    } catch (error) {
+        console.error('AI 提供商初始化失败:', error);
+        // 使用默认配置
+        aiProvider = ProviderFactory.createDefault();
+    }
+}
 
   async function processJobListings() {
-    let processedCount = 0;
-    const maxJobs = 100; // Adjust this number as needed
-    let currentPage = 1;
+    // 检查是否已有进程在运行
+    if (processLock.isLocked()) {
+      console.log('已有申请流程在运行，跳过');
+      return;
+    }
+
+    await processLock.acquire();
+
+    try {
+      let processedCount = 0;
+      const maxJobs = 100;
+      let currentPage = 1;
 
     while (processedCount < maxJobs) {
-        console.log(`Processing page ${currentPage}`);
+        console.log(`处理第 ${currentPage} 页`);
         
         // Scroll down to load all job listings on the current page, then scroll back up
         await scrollToBottomSlowly();
@@ -61,9 +188,9 @@ interface FormField {
             processedCount++;
             
             await delay(500);
-            
-            if (applicationLimit === 0) {
-                console.log("Application limit reached. Stopping the process.");
+
+            if (appState.get().applicationLimit === 0) {
+                console.log("达到申请限制，停止处理");
                 chrome.runtime.sendMessage({ type: MessageType.RATE_LIMIT });
                 return;
             }
@@ -83,9 +210,12 @@ interface FormField {
             break;
         }
     }
-    
+
     console.log(`Processed ${processedCount} job listings in total across ${currentPage} pages`);
     chrome.runtime.sendMessage({ type: MessageType.ALL_JOBS_PROCESSED });
+    } finally {
+      processLock.release();
+    }
 }
 
 async function scrollToBottomSlowly() {
@@ -214,7 +344,7 @@ async function loadNextJobPage(): Promise<boolean> {
 
 
 async function clickDismissButton() {
-    const button = document.querySelector('button[aria-label="Dismiss"]');
+    const button = document.querySelector('button[aria-label="Dismiss"]') as HTMLElement | null;
     if (button) {
         await delay(2000)
       button.click();
@@ -227,37 +357,39 @@ async function clickDismissButton() {
 async function processJobCard(jobCard: HTMLElement) {
     jobCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await delay(500);
-   
 
     const jobLink = jobCard.querySelector('a.job-card-container__link') as HTMLAnchorElement;
     if (jobLink) {
         jobLink.click();
-        await delay(1000); // Wait for job details to load
+        await delay(1000);
 
         const jobTitle = document.querySelector('.job-details-jobs-unified-top-card__job-title')?.textContent?.trim();
         const companyName = document.querySelector('.job-details-jobs-unified-top-card__company-name')?.textContent?.trim();
-         const applyButton = document.querySelector('.jobs-apply-button') as HTMLButtonElement;
-    if (!applyButton) {
-        console.log("Apply button not found. Skipping this job.");
-        return;
-    }
-        console.log(`Processing job: ${jobTitle} at ${companyName}`);
+        const applyButton = document.querySelector('.jobs-apply-button') as HTMLButtonElement;
+        if (!applyButton) {
+            console.log("未找到申请按钮，跳过此职位");
+            return;
+        }
+        console.log(`处理职位: ${jobTitle} @ ${companyName}`);
 
         await extractJobDetails();
-         const resumeUrl = chrome.runtime.getURL(jobDetails.resume)
+        const jd = appState.get().jobDetails;
+        if (!jd?.resume) {
+            errorReporter.report('processJobCard', '未找到简历文件');
+            return;
+        }
+        const resumeUrl = chrome.runtime.getURL(jd.resume);
         const shouldApply = await checkJobDescriptionFit(resumeUrl);
         if (shouldApply) {
             await applyToJob();
         } else {
-            console.log("AI recommends not to apply for this job.");
+            console.log("AI 建议不申请此职位");
         }
-
-     
     }
 }
 
 async function extractJobDetails() {
-    allText = "";
+    let allText = "";
     const selectors = [
         { class: '.jobs-description__container', label: 'Job Description' },
         { class: '.job-details-segment-attribute-card-job-details', label: 'Job Details' },
@@ -269,11 +401,12 @@ async function extractJobDetails() {
     selectors.forEach(selector => {
         const element = document.querySelector(selector.class);
         if (element) {
-            allText += `${selector.label}:\n${element.textContent.trim()}\n\n`;
+            allText += `${selector.label}:\n${element.textContent?.trim()}\n\n`;
         }
     });
 
-    console.log("Extracted Job Text:", allText);
+    appState.update({ allText });
+    console.log("提取的职位文本:", allText);
 }
 
 async function applyToJob() {
@@ -289,14 +422,14 @@ async function applyToJob() {
 
 
     await delay(1000);
-    const headerElement = document.querySelector("h2#header");
+    const headerElement = document.querySelector("h2#header") as HTMLElement | null;
 
-    if (headerElement && headerElement.textContent.trim() === "Job search safety reminder") {
+    if (headerElement && headerElement.textContent?.trim() === "Job search safety reminder") {
         // Find the button with text content "Continue applying"
         const button = Array.from(document.querySelectorAll("button")).find(
-            btn => btn.textContent.trim() === "Continue applying"
-        );
-    
+            btn => btn.textContent?.trim() === "Continue applying"
+        ) as HTMLElement | undefined;
+
         // If the button is found, trigger a click
         if (button) {
             button.click();
@@ -310,19 +443,19 @@ async function applyToJob() {
 
     const easyApplyModal = document.querySelector('.jobs-easy-apply-modal');
     if (easyApplyModal) {
-       
+
         await handleEasyApply();
         clickDismissButton();
     } else {
         await handleExternalApply();
         await delay(1000)
         applyButton.click()
-        if (headerElement && headerElement.textContent.trim() === "Job search safety reminder") {
+        if (headerElement && headerElement.textContent?.trim() === "Job search safety reminder") {
             // Find the button with text content "Continue applying"
             const button = Array.from(document.querySelectorAll("button")).find(
-                btn => btn.textContent.trim() === "Continue applying"
-            );
-        
+                btn => btn.textContent?.trim() === "Continue applying"
+            ) as HTMLElement | undefined;
+
             // If the button is found, trigger a click
             if (button) {
                 button.click();
@@ -349,23 +482,22 @@ async function handleEasyApply() {
     await handleMultiPageForm();
     const submitButton = document.querySelector('button[aria-label="Submit application"]') as HTMLButtonElement;
     if (submitButton) {
-        console.log("Submitting application...");
+        console.log("提交申请...");
         submitButton.click();
         await delay(2000);
-        console.log(userId)
-       
-      
+        console.log('用户 ID:', appState.get().userId);
     } else {
-        console.log("Submit button not found. Application may require manual review.");
+        errorReporter.report('handleEasyApply', '未找到提交按钮', true);
     }
 }
 
 async function handleExternalApply() {
-    console.log("External Apply detected. Opening in new tab...");
-    chrome.runtime.sendMessage({ 
-        type: MessageType.NEW_APPLY_TAB_OPENED, 
-        jobDetails: jobDetails,
-        resumeText: resumeText,
+    console.log("检测到外部申请，在新标签页中打开...");
+    const state = appState.get();
+    chrome.runtime.sendMessage({
+        type: MessageType.NEW_APPLY_TAB_OPENED,
+        jobDetails: state.jobDetails,
+        resumeText: state.resumeText,
     });
 }
 
@@ -393,10 +525,13 @@ async function handleExternalApply() {
     
             const resumeField = findResumeField();
             if (resumeField) {
-                console.log("Resume upload field found on this page");
-                const resumeUrl = chrome.runtime.getURL(jobDetails.resume)
-                await uploadResume(resumeUrl);
-                await delay(2000);
+                console.log("找到简历上传字段");
+                const jd = appState.get().jobDetails;
+                if (jd?.resume) {
+                    const resumeUrl = chrome.runtime.getURL(jd.resume);
+                    await uploadResume(resumeUrl);
+                    await delay(2000);
+                }
             }
     
            const sectionTitle = getSectionTitle();
@@ -457,29 +592,31 @@ function extractFormFields(): Record<string, FormField> {
     const formFields: Record<string, FormField> = {};
   
     // Extract select fields (multiple choice)
-    document.querySelectorAll(selectors.select).forEach((select: HTMLSelectElement) => {
-      const id = select.id;
+    document.querySelectorAll(selectors.select).forEach((select) => {
+      const selectEl = select as HTMLSelectElement;
+      const id = selectEl.id;
       const label = document.querySelector(`label[for="${id}"]`)?.textContent?.trim() || '';
-      
+
       formFields[id] = {
         id,
         type: 'select',
         inputType: null,
         label,
         placeholder: '',
-        required: select.required,
-        options: Array.from(select.options).map(opt => opt.value),
-        element: select
+        required: selectEl.required,
+        options: Array.from(selectEl.options).map(opt => opt.value),
+        element: selectEl
       };
     });
   
     // Extract radio groups
-    document.querySelectorAll(selectors.fieldset).forEach((fieldset: HTMLFieldSetElement) => {
-      const legend = fieldset.querySelector('legend');
-      const radioButtons = fieldset.querySelectorAll('input[type="radio"]');
+    document.querySelectorAll(selectors.fieldset).forEach((fieldset) => {
+      const fieldsetEl = fieldset as HTMLFieldSetElement;
+      const legend = fieldsetEl.querySelector('legend');
+      const radioButtons = fieldsetEl.querySelectorAll('input[type="radio"]');
   
       if (legend && radioButtons.length > 0) {
-        const fieldName = fieldset.id || 'radioGroup' + Math.random().toString(36).substr(2, 9);
+        const fieldName = fieldsetEl.id || 'radioGroup' + Math.random().toString(36).substr(2, 9);
         const legendText = legend.textContent?.trim() || '';
         const isRequired = legend.querySelector('.fb-dash-form-element__label-title--is-required') !== null;
   
@@ -490,43 +627,45 @@ function extractFormFields(): Record<string, FormField> {
           label: legendText,
           placeholder: '',
           required: isRequired,
-          options: Array.from(radioButtons).map((radio: HTMLInputElement) => radio.value),
+          options: Array.from(radioButtons).map((radio) => (radio as HTMLInputElement).value),
           element: radioButtons[0] as HTMLElement
         };
       }
     });
-  
+
     // Extract other input fields
-    document.querySelectorAll(selectors.textInput).forEach((input: HTMLInputElement | HTMLTextAreaElement) => {
-      const id = input.id;
+    document.querySelectorAll(selectors.textInput).forEach((input) => {
+      const inputEl = input as HTMLInputElement | HTMLTextAreaElement;
+      const id = inputEl.id;
       const label = document.querySelector(`label[for="${id}"]`)?.textContent?.trim() || '';
-      
+
       formFields[id] = {
         id,
-        type: input.tagName.toLowerCase(),
-        inputType: input instanceof HTMLInputElement ? input.type : null,
+        type: inputEl.tagName.toLowerCase(),
+        inputType: inputEl instanceof HTMLInputElement ? inputEl.type : null,
         label,
-        placeholder: input.placeholder,
-        required: input.required,
+        placeholder: inputEl.placeholder,
+        required: inputEl.required,
         options: null,
-        element: input
+        element: inputEl
       };
     });
   
     // Extract checkboxes
-    document.querySelectorAll(selectors.checkbox).forEach((checkbox: HTMLInputElement) => {
-      const id = checkbox.id;
+    document.querySelectorAll(selectors.checkbox).forEach((checkbox) => {
+      const checkboxEl = checkbox as HTMLInputElement;
+      const id = checkboxEl.id;
       const label = document.querySelector(`label[for="${id}"]`)?.textContent?.trim() || '';
-      
+
       formFields[id] = {
         id,
         type: 'checkbox',
         inputType: 'checkbox',
         label,
         placeholder: '',
-        required: checkbox.required,
+        required: checkboxEl.required,
         options: null,
-        element: checkbox
+        element: checkboxEl
       };
     });
   
@@ -561,12 +700,12 @@ function extractFormFields(): Record<string, FormField> {
         }
 
         // Create PDF from URL
-        
+
         const pdfData = await createPDFFromURL(resumeUrl);
-        
+
         // Create a File object
         const resumeFile = new File([pdfData], "resume.pdf", { type: 'application/pdf' });
-        console.log(resumeFile)
+        console.log('简历文件:', resumeFile);
         // Set the file
         const dataTransfer = new DataTransfer();
         dataTransfer.items.add(resumeFile);
@@ -636,7 +775,7 @@ const reviewSection = document.querySelector('h3.t-18[textContent="Review your a
 
 
 const elements = document.querySelectorAll('.jobs-easy-apply-form-section__group-title.t-14');
-const linkedInProfileElement = Array.from(elements).find(el => el.textContent.trim() === 'LinkedIn Profile*');
+const linkedInProfileElement = Array.from(elements).find(el => el.textContent?.trim() === 'LinkedIn Profile*');
         
         const formFields = extractFormFields();
 
@@ -647,18 +786,23 @@ const linkedInProfileElement = Array.from(elements).find(el => el.textContent.tr
                 continue;
             }
             else if(fieldInfo.label.includes("First name") ) {
-                console.log("Skipping name field in fillFormWithAI");
-                
-                fieldInfo.element.value = jobDetails.fullName.split(" ")[0]
-                fieldInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
-                fieldInfo.element.dispatchEvent(new Event('change', { bubbles: true }));
+                console.log("跳过名字字段");
+                const jd = appState.get().jobDetails;
+                if (jd) {
+                    (fieldInfo.element as HTMLInputElement).value = jd.fullName.split(" ")[0];
+                    fieldInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
+                    fieldInfo.element.dispatchEvent(new Event('change', { bubbles: true }));
+                }
                 continue;
             }
             else if(fieldInfo.label.includes("Last name") ) {
-                console.log("Skipping name field in fillFormWithAI");
-                fieldInfo.element.value = jobDetails.fullName.split(" ")[1]
-                fieldInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
-                fieldInfo.element.dispatchEvent(new Event('change', { bubbles: true }));
+                console.log("跳过姓氏字段");
+                const jd = appState.get().jobDetails;
+                if (jd) {
+                    (fieldInfo.element as HTMLInputElement).value = jd.fullName.split(" ")[1];
+                    fieldInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
+                    fieldInfo.element.dispatchEvent(new Event('change', { bubbles: true }));
+                }
                 continue;
             }
             else if(fieldInfo.label.toLocaleLowerCase().includes("email") && fieldInfo.type === "select") {
@@ -670,9 +814,12 @@ const linkedInProfileElement = Array.from(elements).find(el => el.textContent.tr
                 continue
             }
             else if(fieldInfo.label.toLocaleLowerCase().trim().includes("phone") && sectionTitle.includes("Contact info") ) {
-                fieldInfo.element.value = jobDetails.phone
-                fieldInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
-                fieldInfo.element.dispatchEvent(new Event('change', { bubbles: true }));
+                const jd = appState.get().jobDetails;
+                if (jd?.phone) {
+                    (fieldInfo.element as HTMLInputElement).value = jd.phone;
+                    fieldInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
+                    fieldInfo.element.dispatchEvent(new Event('change', { bubbles: true }));
+                }
               continue;
             }
             else if (fieldInfo.element instanceof HTMLInputElement && fieldInfo.element.type === 'checkbox') {
@@ -689,7 +836,7 @@ const linkedInProfileElement = Array.from(elements).find(el => el.textContent.tr
                     continue;
                 }         
             }     
-             else if(fieldInfo.label == null && fieldInfo.element.value ==!null) {
+             else if(fieldInfo.label == null && (fieldInfo.element as HTMLInputElement).value != null) {
                 console.log("Skipping it has already value");
                 continue;
             } else if(reviewSection) {
@@ -702,7 +849,7 @@ const linkedInProfileElement = Array.from(elements).find(el => el.textContent.tr
             }
 
   
-            await fillFormField(fieldName, fieldInfo, jobDetails, resumeText);
+            await fillFormField(fieldName, fieldInfo, appState.get().jobDetails!, appState.get().resumeText);
             await delay(500);
     
         }
@@ -715,27 +862,27 @@ const linkedInProfileElement = Array.from(elements).find(el => el.textContent.tr
 async function removeAllWorkExperiences(section: Element) {
     const entries = section.querySelectorAll('.artdeco-card');
     for (let i = entries.length - 1; i >= 0; i--) {
-        await removeEntry(entries[i]);
+        await removeEntry(entries[i] as HTMLElement);
     }
     console.log("All work experience entries removed.");
 }
 
 async function removeEducation() {
-  
+
         // Step 1: Click the initial Remove button
-        const initialRemoveButton = document.querySelector('button[aria-label="Remove the following work experience"].artdeco-button');
+        const initialRemoveButton = document.querySelector('button[aria-label="Remove the following work experience"].artdeco-button') as HTMLElement | null;
         if (initialRemoveButton) {
             initialRemoveButton.click();
             console.log("Initial Remove button clicked successfully");
         }
-       
+
 
         // Wait for the confirmation modal to appear
         await new Promise(resolve => setTimeout(resolve, 1000)); // Adjust timing as needed
 
         // Step 2: Click the confirmation Remove button
         // Using a more robust selector that doesn't rely on a specific ID
-        const confirmRemoveButton = document.querySelector('button.artdeco-modal__confirm-dialog-btn.artdeco-button--primary[data-test-dialog-primary-btn]');
+        const confirmRemoveButton = document.querySelector('button.artdeco-modal__confirm-dialog-btn.artdeco-button--primary[data-test-dialog-primary-btn]') as HTMLElement | null;
         if (confirmRemoveButton) {
             confirmRemoveButton.click();
             console.log("Confirm Remove button clicked successfully");
@@ -750,7 +897,7 @@ async function removeEducation() {
 }
 
 
-async function removeEntry(entry: Element) {
+async function removeEntry(entry: HTMLElement) {
     const removeButton = entry.nextElementSibling?.querySelector('button[aria-label="Remove the following work experience"]') as HTMLButtonElement | null;
     if (removeButton) {
         removeButton.click();
@@ -760,9 +907,9 @@ async function removeEntry(entry: Element) {
 
 
 
-async function fillEducationFields(experience: WorkExperience) {
+async function fillEducationFields(experience: Education) {
     const formFields = extractFormFields();
-    
+
     for (const [fieldName, fieldInfo] of Object.entries(formFields)) {
         const label = fieldInfo.label
         const element = fieldInfo.element;
@@ -779,14 +926,14 @@ async function fillEducationFields(experience: WorkExperience) {
             await fillField(element, experience.degree);
         } else if (label.toLowerCase().includes('location') || label.toLowerCase().includes('city')) {
             console.log("I am city")
-            await handleCityField(element, experience.city);
+            await handleCityField(element as HTMLInputElement, experience.city);
         } else if (label.toLowerCase().includes('field of study')) {
             console.log("I am major")
             await fillField(element, experience.major);
         } else if (fieldInfo.label.toLowerCase().includes('dates of employment') || fieldName.includes('dateRange')) {
             console.log("date of range", fieldName)
-            
-            await fillEmploymentDates(fieldInfo.element.closest('.jobs-easy-apply-form-element'), `${experience.startDate} - ${experience.endDate}`);
+
+            await fillEmploymentDates(fieldInfo.element.closest('.jobs-easy-apply-form-element') as HTMLElement, `${experience.startDate} - ${experience.endDate}`);
             console.log(`${experience.startDate} - ${experience.endDate}`)
         }
         else {
@@ -817,14 +964,14 @@ async function fillWorkExperienceFields(experience: WorkExperience) {
             await fillField(element, experience.company);
         } else if (label.toLowerCase().includes('location') || label.toLowerCase().includes('city')) {
             console.log("I am city")
-            await handleCityField(element, experience.city);
+            await handleCityField(element as HTMLInputElement, experience.city);
         } else if (label.toLowerCase().includes('description')) {
             console.log("I am description")
             await fillField(element, experience.description);
         } else if (fieldInfo.label.toLowerCase().includes('dates of employment') || fieldName.includes('dateRange')) {
             console.log("Hello i am sushen oli", fieldName)
-            
-            await fillEmploymentDates(fieldInfo.element.closest('.jobs-easy-apply-form-element'), `${experience.startDate} - ${experience.endDate}`);
+
+            await fillEmploymentDates(fieldInfo.element.closest('.jobs-easy-apply-form-element') as HTMLElement, `${experience.startDate} - ${experience.endDate}`);
             console.log(`${experience.startDate} - ${experience.endDate}`)
         }
         else {
@@ -847,7 +994,7 @@ async function fillField(element: HTMLElement, value: string) {
 function getReviewSection() {
     // Method 1: Using querySelector with exact text match
     const reviewSection = document.querySelector('h3.t-18:not([id])');
-    if (reviewSection && reviewSection.textContent.trim() === "Review your application") {
+    if (reviewSection && reviewSection.textContent?.trim() === "Review your application") {
         return reviewSection;
     }
 
@@ -870,24 +1017,19 @@ async function handleWorkExperienceSection() {
     const workExperienceSection = document.querySelector('.jobs-easy-apply-form-section__grouping');
 
     if (workExperienceSection) {
-        // Remove existing entries
         await removeAllWorkExperiences(workExperienceSection);
-        await handleAddMore()
-        // Add and fill new entries
-        console.log(workExperiences)
-        for (let i = 0; i < workExperiences.length; i++) {
-            const experience = workExperiences[i];
-            console.log(`Filling work experience ${i + 1}:`, experience);
+        await handleAddMore();
+        const workExps = appState.get().workExperiences;
+        console.log('工作经历:', workExps);
+        for (let i = 0; i < workExps.length; i++) {
+            const experience = workExps[i];
+            console.log(`填写工作经历 ${i + 1}:`, experience);
 
             await fillWorkExperienceFields(experience);
             await clickSaveButton();
-           
-            if(workExperiences.length > i+1){
-                console.log(workExperiences.length)
-                console.log("Work experience not requireed i am sushen oli what 's your name")
+
+            if (workExps.length > i + 1) {
                 await handleAddMore();
-            } else {
-                console.log("What's up what are you doing")
             }
             await delay(1000);
         }
@@ -897,28 +1039,21 @@ async function handleWorkExperienceSection() {
 }
 
 async function handleEducationSection() {
-    
-        // Remove existing entries
-        await removeEducation()
-        await handleAddMore()
-        // Add and fill new entries
-        for (let i = 0; i < educations.length; i++) {
-            const experience = educations[i];
-            console.log(`Filling work experience ${i + 1}:`, experience);
-          
-            await fillEducationFields(experience)
-            await clickSaveButton();
-            await delay(1500)
-            if(educations.length > i+1){
-                console.log(educations.length)
-                console.log("Work experience not requireed i am sushen oli what 's your name")
-                await handleAddMore();
-            } else {
-                console.log("What's up what are you doing")
-            }
-            await delay(2000);
+    await removeEducation();
+    await handleAddMore();
+    const edus = appState.get().educations;
+    for (let i = 0; i < edus.length; i++) {
+        const experience = edus[i];
+        console.log(`填写教育背景 ${i + 1}:`, experience);
+
+        await fillEducationFields(experience);
+        await clickSaveButton();
+        await delay(1500);
+        if (edus.length > i + 1) {
+            await handleAddMore();
         }
-  
+        await delay(2000);
+    }
 }
 
 
@@ -939,7 +1074,7 @@ function handleAddMore() {
 }
 
 
-async function fillFormField(fieldName: string, fieldInfo: any, jobDetails: JobDetail, resumeText: string) {
+async function fillFormField(fieldName: string, fieldInfo: any, _jobDetails: JobDetail | null, _resumeText: string) {
  
  
     let sectionTitle = 'Unknown Section';
@@ -1036,15 +1171,15 @@ async function fillFormField(fieldName: string, fieldInfo: any, jobDetails: JobD
 
 async function clickSaveButton() {
     // Find the button with the class 'artdeco-button--secondary'
-    const saveButton = document.querySelector('button.artdeco-button--secondary');
+    const saveButton = document.querySelector('button.artdeco-button--secondary') as HTMLElement | null;
 
     // Check if the button exists and if the text content is 'Save'
-    if (saveButton && saveButton.textContent.trim().toLowerCase() === 'save') {
+    if (saveButton && saveButton.textContent?.trim().toLowerCase() === 'save') {
         console.log('Clicking Save button');
-        
+
         // Wait for 1 second (1000 milliseconds)
         await delay(1000);
-        
+
         // Click the save button
         saveButton.click();
         
@@ -1081,16 +1216,17 @@ async function handleRadioField(radioElement: HTMLInputElement, value: string) {
 
     let selectedRadio: HTMLInputElement | null = null;
 
-    radioButtons.forEach((radio: HTMLInputElement) => {
-        const radioLabel = radio.nextElementSibling as HTMLLabelElement;
+    for (const radio of Array.from(radioButtons)) {
+        const radioEl = radio as HTMLInputElement;
+        const radioLabel = radioEl.nextElementSibling as HTMLLabelElement;
         const radioLabelText = radioLabel ? radioLabel.textContent?.trim().toLowerCase() : '';
-        
-        if (radio.value.toLowerCase() === normalizedValue || 
+
+        if (radioEl.value.toLowerCase() === normalizedValue ||
             radioLabelText === normalizedValue ||
-            radioLabelText.includes(normalizedValue)) {
-            selectedRadio = radio;
+            radioLabelText?.includes(normalizedValue)) {
+            selectedRadio = radioEl;
         }
-    });
+    }
 
     if (selectedRadio) {
         selectedRadio.checked = true;
@@ -1099,7 +1235,7 @@ async function handleRadioField(radioElement: HTMLInputElement, value: string) {
     } else {
         console.warn(`No matching radio option found for value: ${value}`);
         // Fallback: select the first option if no match is found
-        const firstRadio = radioButtons[0] as HTMLInputElement;
+        const firstRadio = radioButtons[0] as HTMLInputElement | undefined;
         if (firstRadio) {
             firstRadio.checked = true;
             firstRadio.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1403,30 +1539,34 @@ function clickNextOrSubmitButton() {
 
 async function checkJobDescriptionFit(resumeUrl: string): Promise<boolean> {
     await processResume(resumeUrl);
-    console.log("Resume Text:", resumeText);
-    console.log("Job Details:", jobDetails);
+    const state = appState.get();
+    console.log("简历文本:", state.resumeText);
+    console.log("职位详情:", state.jobDetails);
 
     const inputPrompt = `
-    Resumse text = ${resumeText}
-    Job Details: ${jobDetails}
+    Resumse text = ${state.resumeText}
+    Job Details: ${state.jobDetails}
     Please respond with only "Yes" .`;
 
     try {
-        const result = await chatSession.sendMessage(inputPrompt);
-        console.log("API Response:", result);
-        const response = result.response.text().trim();
-        console.log("Parsed Response:", response);
-        
-        const normalizedResponse = response.toLowerCase();
+        if (!aiProvider) {
+            await initAIProvider();
+        }
+
+        const response = await aiProvider.sendMessage(inputPrompt);
+        console.log("API Response:", response);
+        const trimmedResponse = response.trim();
+        console.log("Parsed Response:", trimmedResponse);
+
+        const normalizedResponse = trimmedResponse.toLowerCase();
         if (normalizedResponse === 'yes' || normalizedResponse === 'no') {
-            aiResponse = normalizedResponse;
-            return aiResponse === 'yes';
+            return normalizedResponse === 'yes';
         } else {
             console.error("Unexpected AI response:", response);
             return false;
         }
     } catch (error) {
-        console.error("Error sending message to Gemini API:", error);
+        console.error("Error sending message to AI API:", error);
         return false;
     }
 }
@@ -1434,10 +1574,11 @@ async function checkJobDescriptionFit(resumeUrl: string): Promise<boolean> {
 async function processResume(resumeUrl: string): Promise<void> {
     try {
         const pdfData = await downloadPdf(resumeUrl);
-        resumeText = await extractTextFromPdf(pdfData);
-        console.log("Extracted Resume Text:", resumeText);
+        const text = await extractTextFromPdf(pdfData);
+        appState.update({ resumeText: text });
+        console.log("提取的简历文本:", text);
     } catch (error) {
-        console.error("Error processing resume:", error);
+        errorReporter.report('processResume', error as Error);
         throw error;
     }
 }
@@ -1452,27 +1593,31 @@ async function downloadPdf(pdfUrl: string): Promise<Blob> {
 
 async function extractTextFromPdf(pdfData: Blob): Promise<string> {
     try {
-        return await extractTextFromPDF(pdfData);
+        const file = new File([pdfData], "resume.pdf", { type: 'application/pdf' });
+        const result = await extractTextFromPDF(file, "alphanumericwithspaceandpunctuationandnewline");
+        return (result || '') as string;
     } catch (error) {
         console.error('Error extracting text from PDF:', error);
         throw error;
     }
 }
-let totalToken =0
-async function queryLLM(prompt: string) {
+// 带超时的 AI 查询
+async function queryLLM(prompt: string): Promise<string | null> {
     try {
-        const result = await chatSession.sendMessage(prompt);
-        const response = result.response.text().trim();
-        console.log( await chatSession.getHistory())
-      
-     
-        const token = result.response.usageMetadata?.totalTokenCount
-        totalToken = totalToken + token
-        console.log(totalToken)
-        
+        if (!aiProvider) {
+            await initAIProvider();
+        }
+
+        const response = await Promise.race([
+            aiProvider.sendMessage(prompt),
+            new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error('AI 请求超时')), AI_REQUEST_TIMEOUT);
+            }),
+        ]);
+
         return cleanResponse(response);
     } catch (error) {
-        console.error('Error querying LLM:', error);
+        errorReporter.report('queryLLM', error as Error, true);
         return null;
     }
 }
@@ -1487,22 +1632,22 @@ function cleanResponse(response: string): string {
 
 
  chrome.storage.local.get('applyId', (result) => {
-    userId = result.applyId || "12134"
+    appState.update({ userId: result.applyId || "12134" });
 });
 
-let workExperiences;
-let educations
-
-chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
     if (message.type === MessageType.START_JOB_SEARCH) {
-        console.log("Starting job application process...");
-        jobDetails = message.jobDetails; 
-        
-        workExperiences = jobDetails.workExperiences
-        educations = jobDetails.educations
-      
-        console.log(userId)
-        await delay(5000); // Wait for the page to load
+        console.log("开始求职申请流程...");
+
+        // 重置状态并设置新数据
+        appState.reset();
+        appState.update({
+            jobDetails: message.jobDetails,
+            workExperiences: message.jobDetails.workExperiences,
+            educations: message.jobDetails.educations,
+        });
+
+        await delay(5000);
         await processJobListings();
         sendResponse({ success: true });
         return true;

@@ -1,75 +1,136 @@
-import { MessageType } from '../messages';
+import { MessageType } from '../lib/status-codes';
 import { delay } from './utils';
 
-let applicationCount = 0;
-const MAX_APPLICATIONS = 100; 
-let applicationLimit = MAX_APPLICATIONS;
+// 状态管理器
+class IndeedApplicationStateManager {
+    private state = {
+        applicationCount: 0,
+        applicationLimit: 100,
+        currentPage: 1,
+        isProcessing: false,
+    };
+
+    reset() {
+        this.state = {
+            ...this.state,
+            applicationCount: 0,
+            currentPage: 1,
+            isProcessing: false,
+        };
+    }
+
+    get() {
+        return this.state;
+    }
+
+    update(partial: Partial<typeof this.state>) {
+        this.state = { ...this.state, ...partial };
+        this.saveToPersistence();
+    }
+
+    incrementApplicationCount() {
+        this.state.applicationCount++;
+        this.saveToPersistence();
+    }
+
+    // 保存到本地持久化存储
+    private async saveToPersistence(): Promise<void> {
+        try {
+            await chrome.storage.local.set({
+                'indeed-app-state': {
+                    applicationCount: this.state.applicationCount,
+                    applicationLimit: this.state.applicationLimit,
+                    currentPage: this.state.currentPage,
+                    lastUpdated: Date.now(),
+                }
+            });
+        } catch (error) {
+            console.error('保存状态失败:', error);
+        }
+    }
+
+    // 从本地持久化存储加载
+    async loadFromPersistence(): Promise<void> {
+        try {
+            const result = await chrome.storage.local.get('indeed-app-state');
+            if (result['indeed-app-state']) {
+                const saved = result['indeed-app-state'];
+                this.state = {
+                    ...this.state,
+                    applicationCount: saved.applicationCount || 0,
+                    applicationLimit: saved.applicationLimit || 100,
+                    currentPage: saved.currentPage || 1,
+                };
+                console.log('已加载持久化状态:', saved);
+            }
+        } catch (error) {
+            console.error('加载持久化状态失败:', error);
+        }
+    }
+}
+
+const appState = new IndeedApplicationStateManager();
 
 async function processJobListings() {
-    let currentPage = 1;
+    appState.update({ isProcessing: true });
 
-    while (applicationCount < MAX_APPLICATIONS) {
-        console.log(`Processing page ${currentPage}`);
-        
+    while (appState.get().applicationCount < appState.get().applicationLimit) {
+        console.log(`处理第 ${appState.get().currentPage} 页`);
+
         await scrollToBottomSlowly();
-        
+
         const jobCards = document.querySelectorAll('.jobsearch-ResultsList > li');
-        console.log(`Found ${jobCards.length} job cards on page ${currentPage}`);
-        
-        for (let i = 0; i < jobCards.length && applicationCount < MAX_APPLICATIONS; i++) {
+        console.log(`在第 ${appState.get().currentPage} 页找到 ${jobCards.length} 个职位`);
+
+        for (let i = 0; i < jobCards.length && appState.get().applicationCount < appState.get().applicationLimit; i++) {
             await processJobCard(jobCards[i] as HTMLElement);
-            
-            if (applicationLimit === 0) {
-                console.log("Application limit reached. Stopping the process.");
-                chrome.runtime.sendMessage({ type: MessageType.RATE_LIMIT });
-                return;
-            }
         }
-        
-        if (applicationCount < MAX_APPLICATIONS) {
+
+        if (appState.get().applicationCount < appState.get().applicationLimit) {
             const nextPageLoaded = await loadNextJobPage();
             if (!nextPageLoaded) {
-                console.log("No more pages available. Ending process.");
+                console.log("没有更多页面了，结束处理。");
                 break;
             }
-            currentPage++;
+            appState.update({ currentPage: appState.get().currentPage + 1 });
         } else {
             break;
         }
     }
-    
-    console.log(`Applied to ${applicationCount} jobs in total across ${currentPage} pages`);
+
+    console.log(`总共申请了 ${appState.get().applicationCount} 个职位，跨越 ${appState.get().currentPage} 页`);
+    appState.update({ isProcessing: false });
     chrome.runtime.sendMessage({ type: MessageType.ALL_JOBS_PROCESSED });
 }
 
 async function processJobCard(jobCard: HTMLElement) {
-    console.log("Processing job card...");
-    
-    // Click on the job card to open the job details
+    console.log("处理职位卡片...");
+
+    // 点击职位卡片打开职位详情
     const jobLink = jobCard.querySelector('a.jcs-JobTitle') as HTMLAnchorElement;
     if (jobLink) {
         jobLink.click();
-        await delay(2000); // Wait for job details to load
+        await delay(2000);
     } else {
-        console.log("Job link not found. Skipping this job.");
+        console.log("未找到职位链接，跳过此职位。");
         return;
     }
-    
-    // Look for the apply button
+
+    // 查找申请按钮
     const applyButton = document.querySelector('button[id^="indeedApplyButton"]') as HTMLButtonElement;
     if (applyButton) {
-        console.log("Apply button found. Attempting to apply...");
+        console.log("找到申请按钮，尝试申请...");
         applyButton.click();
-        await delay(3000); // Wait for application modal to open
-        
-        // Handle the application process
+        await delay(3000);
+
+        // 处理申请流程
         await handleApplicationProcess();
     } else {
-        console.log("Apply button not found. This job might require external application.");
+        console.log("未找到申请按钮，此职位可能需要外部申请。");
     }
-    
-    applicationCount++;
-    console.log(`Applied to ${applicationCount} jobs so far.`);
+
+    appState.incrementApplicationCount();
+    console.log(`已申请 ${appState.get().applicationCount} 个职位。`);
 }
 
 async function handleApplicationProcess() {
@@ -173,12 +234,13 @@ async function loadNextJobPage(): Promise<boolean> {
     }
 }
 
-// Start the application process when receiving the START_JOB_SEARCH message
-chrome.runtime.onMessage.addListener(async function(message, sender, sendResponse) {
+// 监听 START_INDEED_JOB_SEARCH 消息开始申请流程
+chrome.runtime.onMessage.addListener(async function(message, _sender, sendResponse) {
     if (message.type === MessageType.START_INDEED_JOB_SEARCH) {
-        applicationLimit = message.applicationLimit
-        console.log("Starting job application process...");
-        await delay(2000); // Wait for the page to load
+        appState.reset();
+        appState.update({ applicationLimit: message.applicationLimit || 100 });
+        console.log("开始职位申请流程...");
+        await delay(2000);
         await processJobListings();
         sendResponse({ success: true });
     }

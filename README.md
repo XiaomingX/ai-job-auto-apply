@@ -1,84 +1,146 @@
-# 演示视频（点击链接查看）
-https://github.com/user-attachments/assets/9aec26dc-4434-4fd7-b864-bd6c2247ad98
+# AI 自动投简历 - Chrome 浏览器扩展
 
+## 功能简介
 
-# 🚀 【AI自动投简历】Chrome浏览器插件
+AI 自动投简历是一款 Chrome 浏览器扩展，借助人工智能自动筛选和投递职位。支持 LinkedIn、Indeed 等主流招聘平台，采用 OpenAI 兼容格式，可对接多种 AI 服务。
 
-### 🧠 用AI帮你自动化找工作
-「AI自动投简历」是一款功能强大的Chrome插件，能借助人工智能筛选LinkedIn上的职位列表，再根据你的个人信息自动投递合适的岗位。你只需设置好求职偏好，插件就会帮你向最匹配的机会提交申请，帮你节省大量时间和精力！
+## 技术栈
 
----
-## 🔧 使用的技术
-- TypeScript（一种常用的编程语言，用于开发插件功能）
+- TypeScript 5
+- React 18
+- Vite 6
+- Chrome Extension Manifest V3
 
-## 🚀 未来会加的功能
-- **支持更多招聘平台**：很快会新增对Indeed（全球热门招聘网站）等其他主流平台的支持。
-- **企业官方招聘网站**：计划实现「自动投递企业官方招聘页面职位」的功能。
+## 核心功能
 
-## 📌 核心功能
-- **AI智能找岗**：根据你的求职偏好，自动投递LinkedIn上的匹配职位。
-- **操作简单**：几分钟就能完成设置和配置，不用复杂操作。
-- **极致自动化**：一键就能开启自动投递，不用手动一个个申请。
-- **更多平台即将支持**：目前仅支持LinkedIn，很快会新增Indeed等其他招聘平台。
+- **AI 智能匹配**：根据简历和职位描述自动判断是否申请
+- **一键投递**：自动化申请流程，无需手动操作
+- **多平台支持**：LinkedIn Easy Apply、Indeed（更多平台开发中）
+- **多 AI 提供商**：支持 OpenAI、Anthropic、通义千问、文心一言、智谱、DeepSeek 等 OpenAI 兼容格式
+- **本地持久化**：申请状态自动保存到 Chrome 本地存储
+- **并发控制**：Mutex/Semaphore 机制防止重复申请
+- **错误恢复**：自动重试和错误报告机制
 
----
+## 快速开始
 
-## 🚀 如何开始使用
+### 环境要求
 
-### 准备工作
-在开始前，请确保你已经准备好了这些：
-- 电脑上已安装Node.js（一种程序运行环境，插件开发和运行需要它）
-- 一个Gemini API密钥（用于调用AI功能，获取链接：[Gemini API](https://gemini.com/)）
+- Node.js 18+
+- pnpm
+- AI 服务 API 密钥
 
 ### 安装步骤
 
-#### 1. 克隆代码仓库（把插件代码下载到本地）：
+1. 克隆仓库
+
    ```bash
    git clone https://github.com/XiaomingX/ai-job-auto-apply
+   cd ai-job-auto-apply
    ```
 
-#### 2. 安装必要的依赖工具（让插件能正常运行）：
+2. 安装依赖
+
    ```bash
-   npm install
+   pnpm install
    ```
 
-#### 3. 在.env文件中添加你的Gemini API密钥（.env是项目里的配置文件，专门存密钥）：
+3. 配置 AI 服务
+
+   在项目根目录创建 `.env` 文件：
+
+   ```
+   AI_BASE_URL=https://api.openai.com
+   AI_API_KEY=sk-your-api-key-here
+   AI_MODEL_NAME=gpt-4
+   ```
+
+   > 支持任何 OpenAI 兼容的 API 端点，如 Anthropic、通义千问、DeepSeek 等。
+
+4. 构建扩展
+
    ```bash
-   GEMINI_API_KEY=your_api_key_here
-   ```
-   （注意：把“your_api_key_here”换成你自己的Gemini API密钥）
-
-#### 4. 启动开发服务器（让插件处于可加载状态）：
-   ```bash
-   npm run dev
+   pnpm build
    ```
 
-#### 5. 在Chrome浏览器中加载插件：
-- 打开Chrome浏览器，在地址栏输入 `chrome://extensions/` 并按回车（进入插件管理页面）。
-- 开启页面右上角的「开发者模式」（只有开启这个模式，才能加载本地的插件）。
-- 点击「加载已解压的扩展程序」，然后在弹出的窗口中，选择你下载的插件项目里的「dist」文件夹。
-- （下图为「加载已解压的扩展程序」操作示意）
-  <img width="473" alt="loadpacked" src="https://github.com/user-attachments/assets/e852dfd8-0f58-484d-8cbd-2dca6d647f7c">
+5. 加载扩展
 
----
+   - 打开 Chrome，访问 `chrome://extensions/`
+   - 开启「开发者模式」
+   - 点击「加载已解压的扩展程序」，选择 `dist` 目录
 
-## 🤝 贡献者(原版更新来自sushen123)
-- **[sushen](https://github.com/sushen123)** - 创建者兼主要开发者
+## 项目结构
 
-「AI自动投简历插件」是一款能简化并加快求职投递流程的创新工具，目前处于测试阶段（beta版）。它借助AI的力量，智能匹配你的个人资料和合适的职位。你的建议和贡献对完善这个项目非常重要：如果发现问题、有新功能想法，或者想参与代码改进，欢迎提交“问题反馈”（issues）、“功能建议”，或通过“代码提交”（pull request）帮忙优化，让这款插件成为全球求职者的实用工具。
+```
+src/
+├── App.tsx                    # 主界面组件（含 AI 配置）
+├── main.tsx                   # 入口文件
+├── background/                # 后台服务模块
+│   ├── index.ts               # Service Worker 入口
+│   ├── message-router.ts      # 消息路由分发
+│   ├── tab-manager.ts         # 标签页管理
+│   ├── script-injector.ts     # 脚本注入
+│   └── retry-handler.ts       # 重试与超时处理
+├── domain/                    # 领域层
+│   ├── models/                # 领域模型（JobProfile, WorkExperience, Education）
+│   ├── interfaces/            # 平台接口（JobPlatform）
+│   └── platforms/             # 平台适配器（LinkedIn, Indeed, Registry）
+├── linkedin/                  # LinkedIn 平台逻辑
+│   ├── content.ts             # Content Script
+│   ├── externalJobs.ts        # 外部职位申请
+│   ├── selectors.ts           # DOM 选择器
+│   └── utils.ts               # 工具函数
+├── indeed/                    # Indeed 平台逻辑
+│   ├── content.ts             # Content Script
+│   └── utils.ts               # 工具函数
+├── lib/                       # 通用库
+│   ├── ai/                    # AI 服务抽象层
+│   │   ├── types.ts           # 类型定义
+│   │   ├── openai-provider.ts # OpenAI 兼容实现
+│   │   ├── provider-factory.ts# 提供商工厂
+│   │   └── config.ts          # 配置验证
+│   ├── persistence.ts         # Chrome Storage 持久化
+│   ├── dom-cache.ts           # DOM 查询缓存
+│   ├── concurrency.ts         # Mutex/Semaphore 并发控制
+│   ├── constants.ts           # UI 常量
+│   ├── platform-maps.ts       # 平台参数映射
+│   └── status-codes.ts        # 消息类型定义
+└── components/                # UI 组件
+```
 
----
+## 开发指南
 
-## ⚠️ 免责声明
-本「AI自动投简历插件」仅用于教育目的。开发者对使用本工具产生的任何结果（如账号问题、投递失败等）不承担责任。
+### 常用命令
 
-使用时请务必遵守以下要求：
-1. 遵守你所使用的招聘平台（如LinkedIn、Indeed）的服务条款；
-2. 符合所有适用的法律、法规和道德标准。
+| 命令 | 说明 |
+|------|------|
+| `pnpm dev` | 启动开发服务器 |
+| `pnpm build` | 构建生产版本 |
+| `pnpm lint` | 代码检查 |
 
-特别提醒：使用自动化工具投递简历可能存在风险，比如可能导致你的平台账号被限制，或影响正常的求职流程。**请谨慎使用本工具，自行承担所有使用风险。**
+### AI 配置
 
----
+支持两种配置方式：
+
+1. **环境变量**（构建时）：在 `.env` 文件中设置 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL_NAME`
+2. **插件界面**（运行时）：在扩展弹窗的「AI 配置」标签页中配置，数据仅存储在本地
+
+### 架构设计
+
+项目采用 DDD（领域驱动设计）分层架构：
+
+- **领域层** (`domain/`)：定义平台接口和领域模型
+- **应用层** (`background/`)：消息路由和任务调度
+- **基础设施层** (`lib/`)：AI 抽象、持久化、并发控制
+- **表现层** (`linkedin/`, `indeed/`)：平台具体的 Content Script
+
+## 贡献者
+
+- [sushen](https://github.com/sushen123) — 原始作者
+
+## 免责声明
+
+本工具仅供学习交流使用。使用者需遵守各招聘平台的服务条款，因使用本工具产生的任何后果由使用者自行承担。
 
 ## 许可证
-本项目基于MIT许可证开源（允许自由使用、修改和分享，只需保留原作者信息），详细条款可查看项目中的「LICENSE.txt」文件。
+
+MIT License

@@ -15,58 +15,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useToast } from '@/hooks/use-toast'
-
-// Types
-interface WorkExperience {
-  title: string;
-  company: string;
-  city: string;
-  description: string;
-  startDate: string;
-  endDate: string;
-  current: boolean;
-}
-
-interface Education {
-  school: string;
-  degree: string;
-  city: string;
-  major: string;
-  startDate: string;
-  endDate: string;
-  current: boolean;
-}
-
-interface JobProfile {
-  id: number;
-  userId: string;
-  fullName: string;
-  email: string;
-  phone: string;
-  address: string;
-  workAddress: string;
-  linkedIn: string | null;
-  desiredJobTitle: string;
-  jobType: string;
-  workLocation: string;
-  willingToRelocate: boolean;
-  salaryRange: string;
-  availability: string;
-  currentEmploymentStatus: string;
-  yearsOfExperience: number;
-  highestEducation: string;
-  fieldOfStudy: string;
-  graduationYear: number;
-  primarySkills: string;
-  languages: string;
-  resume: string | null;
-  coverLetter: string | null;
-  personalStatement: string | null;
-  heardAboutUs: string | null;
-  isDeleted: boolean;
-  workExperiences: WorkExperience[];
-  educations: Education[];
-}
+import {
+  DEFAULT_JOB_BOARDS,
+  ALL_JOB_BOARDS,
+  EXPERIENCE_LEVELS,
+  JOB_TYPES,
+  DATE_POSTED,
+  REMOTE_PREFERENCES,
+  INDUSTRIES,
+  DEFAULT_APPLICATION_LIMIT,
+} from '@/lib/constants'
+import type { JobProfile, JobFilters } from '@/domain/models'
 
 interface JobBoards {
   [key: string]: {
@@ -75,28 +34,9 @@ interface JobBoards {
   };
 }
 
-interface JobFilters {
-  experienceLevel: string;
-  jobType: string[];
-  datePosted: string;
-  remotePreference: string;
-  industry: string[];
-}
-
 enum MessageType {
   START_AUTO_APPLYING = 'START_AUTO_APPLYING',
 }
-
-// Configuration
-const CONFIG = {
-  DEFAULT_JOB_BOARDS: ['linkedin', 'indeed'],
-  ALL_JOB_BOARDS: ['linkedin', 'indeed', 'glassdoor', 'monster'],
-  EXPERIENCE_LEVELS: ['Entry Level', 'Associate', 'Mid-Senior Level', 'Director', 'Executive'],
-  JOB_TYPES: ['Full-time', 'Part-time', 'Contract', 'Temporary', 'Internship', 'Volunteer', 'Apprenticeship'],
-  DATE_POSTED: ['Past 24 hours', 'Past week', 'Past month', 'Any time'],
-  REMOTE_PREFERENCES: ['On-site', 'Remote', 'Hybrid'],
-  INDUSTRIES: ['Technology', 'Healthcare', 'Finance', 'Education', 'Manufacturing', 'Retail', 'Hospitality', 'Media', 'Government'],
-};
 
 // Mock job profiles data with work experiences and education
 const mockJobProfiles: JobProfile[] = [
@@ -244,9 +184,9 @@ const AutoApply: React.FC = () => {
   const [selectedProfileId, setSelectedProfileId] = useState<string>('');
   const [showAllJobBoards, setShowAllJobBoards] = useState(false);
   const [jobBoards, setJobBoards] = useState<JobBoards>(
-    Object.fromEntries(CONFIG.ALL_JOB_BOARDS.map(board => [board, { enabled: false, limit: 0 }]))
+    Object.fromEntries(ALL_JOB_BOARDS.map(board => [board, { enabled: false, limit: 0 }]))
   );
-  const [userLimit] = useState(10);
+  const [userLimit] = useState(DEFAULT_APPLICATION_LIMIT);
   const [jobFilters, setJobFilters] = useState<JobFilters>({
     experienceLevel: '',
     jobType: [],
@@ -256,11 +196,58 @@ const AutoApply: React.FC = () => {
   });
   const [tailorResume, setTailorResume] = useState(true);
 
+  // AI 配置状态
+  const [aiConfig, setAiConfig] = useState({
+    baseUrl: 'https://api.openai.com',
+    apiKey: '',
+    modelName: 'gpt-4',
+  });
+  const [aiConfigSaved, setAiConfigSaved] = useState(false);
+
   const { toast } = useToast();
 
   useEffect(() => {
     setJobProfiles(mockJobProfiles);
+    loadAiConfig();
   }, []);
+
+  // 加载 AI 配置
+  const loadAiConfig = async () => {
+    try {
+      const result = await chrome.storage.sync.get('aiConfig');
+      if (result.aiConfig) {
+        setAiConfig(result.aiConfig);
+        setAiConfigSaved(true);
+      }
+    } catch (error) {
+      console.error('加载 AI 配置失败:', error);
+    }
+  };
+
+  // 保存 AI 配置
+  const saveAiConfig = async () => {
+    try {
+      await chrome.storage.sync.set({ aiConfig });
+      setAiConfigSaved(true);
+      toast({
+        title: "配置已保存",
+        description: "AI 配置已保存到本地存储",
+      });
+    } catch (error) {
+      console.error('保存 AI 配置失败:', error);
+      toast({
+        title: "保存失败",
+        description: "无法保存 AI 配置",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // 更新 AI 配置
+  const updateAiConfig = (field: string, value: string) => {
+    setAiConfig(prev => ({ ...prev, [field]: value }));
+    setAiConfigSaved(false);
+  };
 
   const toggleJobBoard = useCallback((board: string) => {
     setJobBoards(prev => ({
@@ -284,8 +271,8 @@ const AutoApply: React.FC = () => {
   const startAutoApplying = useCallback(() => {
     if (!selectedProfileId) {
       toast({
-        title: "Job Profile Required",
-        description: "Please select a job profile before starting the auto-apply process.",
+        title: "请选择求职档案",
+        description: "开始自动投递前，请先选择一个求职档案。",
         duration: 2000,
         variant: 'destructive'
       });
@@ -295,8 +282,8 @@ const AutoApply: React.FC = () => {
     const totalLimit = getTotalLimit();
     if (totalLimit > userLimit) {
       toast({
-        title: "Limit Exceeded",
-        description: `Your total limit (${totalLimit}) exceeds your available limit (${userLimit}). Please adjust your limits.`,
+        title: "超出限制",
+        description: `您的总限制 (${totalLimit}) 超过了可用限制 (${userLimit})，请调整。`,
         duration: 2000,
         variant: 'destructive'
       });
@@ -305,8 +292,8 @@ const AutoApply: React.FC = () => {
 
     if (totalLimit === 0) {
       toast({
-        title: "No Application Limit Set",
-        description: "Please set a limit for the number of applications before starting the auto-apply process.",
+        title: "未设置申请数量",
+        description: "开始自动投递前，请先设置申请数量限制。",
         duration: 2000,
         variant: 'destructive'
       });
@@ -317,8 +304,8 @@ const AutoApply: React.FC = () => {
 
     if (!isAnyJobBoardEnabled) {
       toast({
-        title: "No Job Boards Enabled",
-        description: "Please enable at least one job board to start the auto-apply process.",
+        title: "未启用招聘平台",
+        description: "请至少启用一个招聘平台后再开始投递。",
         duration: 3000,
         variant: 'destructive'
       });
@@ -347,8 +334,8 @@ const AutoApply: React.FC = () => {
       }, (response) => {
         if (response && response.success) {
           toast({
-            title: "Auto-applying Started",
-            description: "We're now applying to jobs for you!",
+            title: "自动投递已启动",
+            description: "正在为您投递职位！",
             duration: 3000
           });
           confetti({
@@ -359,8 +346,8 @@ const AutoApply: React.FC = () => {
         } else {
           console.log(response);
           toast({
-            title: "Failed to Start",
-            description: "There was an error starting the auto-apply process.",
+            title: "启动失败",
+            description: "启动自动投递时出现错误。",
             duration: 3000,
             variant: 'destructive'
           });
@@ -369,8 +356,8 @@ const AutoApply: React.FC = () => {
     } else {
       console.log('Starting auto-apply with:', { updatedJobBoards, selectedProfile, jobFilters, tailorResume });
       toast({
-        title: "Auto-applying Started",
-        description: "We're now applying to jobs for you!",
+        title: "自动投递已启动",
+        description: "正在为您投递职位！",
         duration: 3000
       });
       confetti({
@@ -381,28 +368,29 @@ const AutoApply: React.FC = () => {
     }
   }, [jobBoards, selectedProfileId, jobFilters, toast, userLimit, getTotalLimit, tailorResume, jobProfiles]);
 
-  const visibleJobBoards = showAllJobBoards ? CONFIG.ALL_JOB_BOARDS : CONFIG.DEFAULT_JOB_BOARDS;
+  const visibleJobBoards = showAllJobBoards ? ALL_JOB_BOARDS : DEFAULT_JOB_BOARDS;
 
   return (
     <TooltipProvider>
       <div className="w-96 max-w-md p-4 bg-white rounded-xl shadow-2xl">
-        <h2 className="text-2xl font-bold mb-4 text-center text-blue-800">AutoApply.Jobs</h2>
+        <h2 className="text-2xl font-bold mb-4 text-center text-blue-800">AI自动投简历</h2>
         <div className="mb-4 text-sm text-center">
-          Available Applications: <span className="font-bold text-blue-600">{userLimit - getTotalLimit()}</span> / {userLimit}
+          可用申请次数：<span className="font-bold text-blue-600">{userLimit - getTotalLimit()}</span> / {userLimit}
         </div>
         <Tabs defaultValue="job-profile" className="w-full">
-          <TabsList className="grid w-full grid-cols-3 mb-4">
-            <TabsTrigger value="job-profile" className="text-sm">Job Profile</TabsTrigger>
-            <TabsTrigger value="job-boards" className="text-sm">Job Boards</TabsTrigger>
-            <TabsTrigger value="filters" className="text-sm">Filters</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-4 mb-4">
+            <TabsTrigger value="job-profile" className="text-sm">求职档案</TabsTrigger>
+            <TabsTrigger value="job-boards" className="text-sm">招聘平台</TabsTrigger>
+            <TabsTrigger value="filters" className="text-sm">筛选条件</TabsTrigger>
+            <TabsTrigger value="ai-config" className="text-sm">AI 配置</TabsTrigger>
           </TabsList>
           <TabsContent value="job-profile">
             <Card>
               <CardContent className="pt-4">
-                <Label htmlFor="jobProfile" className="text-sm">Select Job Profile</Label>
+                <Label htmlFor="jobProfile" className="text-sm">选择求职档案</Label>
                 <Select onValueChange={setSelectedProfileId} value={selectedProfileId}>
                   <SelectTrigger id="jobProfile" className="text-sm">
-                    <SelectValue placeholder="Select a job profile" />
+                    <SelectValue placeholder="请选择求职档案" />
                   </SelectTrigger>
                   <SelectContent className="max-h-[200px] overflow-y-auto">
                     {jobProfiles.map((profile) => (
@@ -426,14 +414,14 @@ const AutoApply: React.FC = () => {
                     checked={tailorResume}
                     onCheckedChange={(checked) => setTailorResume(checked as boolean)}
                   />
-                  <span>Tailor resume based on job description</span>
+                  <span>根据职位描述优化简历</span>
                 </Label>
               </CardContent>
             </Card>
             {selectedProfileId && (
               <Card className="mt-4">
                 <CardContent className="pt-4">
-                  <h3 className="text-lg font-semibold mb-2">Profile Details</h3>
+                  <h3 className="text-lg font-semibold mb-2">档案详情</h3>
                   {jobProfiles.find(profile => profile.id.toString() === selectedProfileId)?.workExperiences.map((exp, index) => (
                     <div key={index} className="mb-2">
                       <h4 className="text-sm font-semibold">{exp.title} at {exp.company}</h4>
@@ -489,12 +477,12 @@ const AutoApply: React.FC = () => {
                     {showAllJobBoards ? (
                       <>
                         <ChevronUp className="mr-2 h-4 w-4" />
-                        Show Less
+                        收起
                       </>
                     ) : (
                       <>
                         <ChevronDown className="mr-2 h-4 w-4" />
-                        See More Job Boards
+                        查看更多平台
                       </>
                     )}
                   </Button>
@@ -504,25 +492,25 @@ const AutoApply: React.FC = () => {
           </TabsContent>
           <TabsContent value="filters">
             <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
-              <FilterSection title="Experience Level" icon={<Briefcase className="h-4 w-4" />}>
+              <FilterSection title="经验要求" icon={<Briefcase className="h-4 w-4" />}>
                 <Select
                   value={jobFilters.experienceLevel}
                   onValueChange={(value) => setJobFilters(prev => ({ ...prev, experienceLevel: value }))}
                 >
                   <SelectTrigger className="text-sm">
-                    <SelectValue placeholder="Select experience level" />
+                    <SelectValue placeholder="请选择经验等级" />
                   </SelectTrigger>
                   <SelectContent>
-                    {CONFIG.EXPERIENCE_LEVELS.map((level) => (
+                    {EXPERIENCE_LEVELS.map((level) => (
                       <SelectItem key={level} value={level} className="text-sm">{level}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </FilterSection>
 
-              <FilterSection title="Job Type" icon={<Briefcase className="h-4 w-4" />}>
+              <FilterSection title="工作类型" icon={<Briefcase className="h-4 w-4" />}>
                 <div className="grid grid-cols-2 gap-2">
-                  {CONFIG.JOB_TYPES.map((type) => (
+                  {JOB_TYPES.map((type) => (
                     <Label key={type} className="flex items-center space-x-2 text-sm">
                       <Checkbox
                         checked={jobFilters.jobType.includes(type)}
@@ -541,28 +529,28 @@ const AutoApply: React.FC = () => {
                 </div>
               </FilterSection>
 
-              <FilterSection title="Date Posted" icon={<Calendar className="h-4 w-4" />}>
+              <FilterSection title="发布日期" icon={<Calendar className="h-4 w-4" />}>
                 <Select
                   value={jobFilters.datePosted}
                   onValueChange={(value) => setJobFilters(prev => ({...prev, datePosted: value }))}
                 >
                   <SelectTrigger className="text-sm">
-                    <SelectValue placeholder="Select date posted" />
+                    <SelectValue placeholder="请选择发布时间" />
                   </SelectTrigger>
                   <SelectContent>
-                    {CONFIG.DATE_POSTED.map((option) => (
+                    {DATE_POSTED.map((option) => (
                       <SelectItem key={option} value={option} className="text-sm">{option}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </FilterSection>
 
-              <FilterSection title="Remote Preference" icon={<Globe className="h-4 w-4" />}>
+              <FilterSection title="办公方式" icon={<Globe className="h-4 w-4" />}>
                 <RadioGroup
                   value={jobFilters.remotePreference}
                   onValueChange={(value) => setJobFilters(prev => ({ ...prev, remotePreference: value }))}
                 >
-                  {CONFIG.REMOTE_PREFERENCES.map((option) => (
+                  {REMOTE_PREFERENCES.map((option) => (
                     <div key={option} className="flex items-center space-x-2">
                       <RadioGroupItem value={option} id={option} />
                       <Label htmlFor={option} className="text-sm">{option}</Label>
@@ -571,9 +559,9 @@ const AutoApply: React.FC = () => {
                 </RadioGroup>
               </FilterSection>
 
-              <FilterSection title="Industry" icon={<Briefcase className="h-4 w-4" />}>
+              <FilterSection title="行业领域" icon={<Briefcase className="h-4 w-4" />}>
                 <div className="grid grid-cols-2 gap-2">
-                  {CONFIG.INDUSTRIES.map((industry) => (
+                  {INDUSTRIES.map((industry) => (
                     <Label key={industry} className="flex items-center space-x-2 text-sm">
                       <Checkbox
                         checked={jobFilters.industry.includes(industry)}
@@ -593,6 +581,87 @@ const AutoApply: React.FC = () => {
               </FilterSection>
             </div>
           </TabsContent>
+          <TabsContent value="ai-config">
+            <Card>
+              <CardContent className="pt-4">
+                <div className="space-y-4">
+                  <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
+                    <p className="text-sm text-blue-800">
+                      <strong>隐私提示：</strong>您的 AI 配置仅保存在本地浏览器中，不会上传到任何远程服务器。
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="ai-base-url" className="text-sm">API 地址</Label>
+                    <Input
+                      id="ai-base-url"
+                      type="url"
+                      placeholder="https://api.openai.com"
+                      value={aiConfig.baseUrl}
+                      onChange={(e) => updateAiConfig('baseUrl', e.target.value)}
+                      className="text-sm"
+                    />
+                    <p className="text-xs text-gray-500">
+                      支持 OpenAI、Anthropic、通义千问等兼容 OpenAI 格式的服务
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="ai-api-key" className="text-sm">API 密钥</Label>
+                    <Input
+                      id="ai-api-key"
+                      type="password"
+                      placeholder="sk-..."
+                      value={aiConfig.apiKey}
+                      onChange={(e) => updateAiConfig('apiKey', e.target.value)}
+                      className="text-sm"
+                    />
+                    <p className="text-xs text-gray-500">
+                      您的 API 密钥将安全存储在本地，不会泄露给第三方
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="ai-model-name" className="text-sm">模型名称</Label>
+                    <Input
+                      id="ai-model-name"
+                      type="text"
+                      placeholder="gpt-4"
+                      value={aiConfig.modelName}
+                      onChange={(e) => updateAiConfig('modelName', e.target.value)}
+                      className="text-sm"
+                    />
+                    <p className="text-xs text-gray-500">
+                      常用模型：gpt-4、claude-3-opus-20240229、qwen-turbo、glm-4
+                    </p>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <Button
+                      onClick={saveAiConfig}
+                      className="bg-blue-600 text-white hover:bg-blue-700 text-sm"
+                    >
+                      保存配置
+                    </Button>
+                    {aiConfigSaved && (
+                      <span className="text-sm text-green-600">✓ 已保存</span>
+                    )}
+                  </div>
+
+                  <div className="p-3 bg-gray-50 rounded-lg">
+                    <p className="text-sm font-medium mb-2">支持的 AI 服务：</p>
+                    <ul className="text-xs text-gray-600 space-y-1">
+                      <li>• OpenAI: https://api.openai.com</li>
+                      <li>• Anthropic: https://api.anthropic.com</li>
+                      <li>• 通义千问: https://dashscope.aliyuncs.com/compatible-mode</li>
+                      <li>• 智谱: https://open.bigmodel.cn/api/paas</li>
+                      <li>• DeepSeek: https://api.deepseek.com</li>
+                    </ul>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
         </Tabs>
         <div className="mt-4">
           <Tooltip>
@@ -603,16 +672,16 @@ const AutoApply: React.FC = () => {
                   className="w-full bg-blue-600 text-white hover:bg-blue-700 text-sm"
                 >
                   <Rocket className="mr-2 h-4 w-4" />
-                  Start AutoApplying
+                  开始自动投递
                 </Button>
               </div>
             </TooltipTrigger>
             <TooltipContent>
               {!selectedProfileId
-                ? "Please select a job profile before starting"
+                ? "请先选择求职档案"
                 : getTotalLimit() > userLimit
-                ? "Total limit exceeds available applications"
-                : "Click to start auto-applying"}
+                ? "总申请数超出可用限制"
+                : "点击开始自动投递"}
             </TooltipContent>
           </Tooltip>
         </div>
