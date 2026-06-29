@@ -6,10 +6,14 @@ AI 自动投简历是一款 Chrome 浏览器扩展，借助人工智能自动筛
 
 ## 技术栈
 
-- TypeScript 5
-- React 18
-- Vite 6
-- Chrome Extension Manifest V3
+| 技术 | 版本 | 说明 |
+|------|------|------|
+| TypeScript | 5.x | 类型安全 |
+| React | 18.x | UI 框架 |
+| Vite | 5.x | 构建工具 |
+| Tailwind CSS | 3.x | 样式框架 |
+| Radix UI | 1.x | 无样式组件库 |
+| Chrome Extension | Manifest V3 | 扩展规范 |
 
 ## 核心功能
 
@@ -21,52 +25,80 @@ AI 自动投简历是一款 Chrome 浏览器扩展，借助人工智能自动筛
 - **并发控制**：Mutex/Semaphore 机制防止重复申请
 - **错误恢复**：自动重试和错误报告机制
 
+---
+
 ## 快速开始
 
-### 环境要求
+### 第一步：环境准备
 
-- Node.js 18+
-- pnpm
-- AI 服务 API 密钥
+确保你的电脑已安装：
 
-### 安装步骤
+- **Node.js** 18 或更高版本（[下载](https://nodejs.org/)）
+- **pnpm** 包管理器（安装命令：`npm install -g pnpm`）
+- **Chrome 浏览器**
 
-1. 克隆仓库
+验证安装：
+```bash
+node -v   # 应显示 v18.x 或更高
+pnpm -v   # 应显示 8.x 或更高
+```
 
-   ```bash
-   git clone https://github.com/XiaomingX/ai-job-auto-apply
-   cd ai-job-auto-apply
-   ```
+### 第二步：克隆并安装
 
-2. 安装依赖
+```bash
+# 克隆项目
+git clone https://github.com/XiaomingX/ai-job-auto-apply
+cd ai-job-auto-apply
 
-   ```bash
-   pnpm install
-   ```
+# 安装依赖
+pnpm install
+```
 
-3. 配置 AI 服务
+### 第三步：配置 AI 服务
 
-   在项目根目录创建 `.env` 文件：
+在项目根目录创建 `.env` 文件：
 
-   ```
-   AI_BASE_URL=https://api.openai.com
-   AI_API_KEY=sk-your-api-key-here
-   AI_MODEL_NAME=gpt-4
-   ```
+```env
+AI_BASE_URL=https://api.openai.com
+AI_API_KEY=sk-你的API密钥
+AI_MODEL_NAME=gpt-4
+```
 
-   > 支持任何 OpenAI 兼容的 API 端点，如 Anthropic、通义千问、DeepSeek 等。
+> **支持的 AI 服务**（任何 OpenAI 兼容格式均可）：
+>
+> | 服务 | API 地址 | 模型示例 |
+> |------|----------|----------|
+> | OpenAI | `https://api.openai.com` | `gpt-4`、`gpt-4o` |
+> | DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
+> | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+> | 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `glm-4` |
+> | Anthropic | `https://api.anthropic.com/v1` | `claude-3-sonnet` |
 
-4. 构建扩展
+### 第四步：构建扩展
 
-   ```bash
-   pnpm build
-   ```
+```bash
+pnpm build
+```
 
-5. 加载扩展
+构建成功后，`dist` 目录即为扩展文件。
 
-   - 打开 Chrome，访问 `chrome://extensions/`
-   - 开启「开发者模式」
-   - 点击「加载已解压的扩展程序」，选择 `dist` 目录
+### 第五步：加载到 Chrome
+
+1. 打开 Chrome 浏览器，地址栏输入 `chrome://extensions/`
+2. 开启右上角的 **「开发者模式」** 开关
+3. 点击 **「加载已解压的扩展程序」**
+4. 选择项目中的 `dist` 文件夹
+5. 扩展图标出现在浏览器工具栏中即表示安装成功
+
+### 第六步：开始使用
+
+1. 点击浏览器工具栏中的扩展图标
+2. 在弹出面板中配置你的 **求职档案**（姓名、邮箱、简历等）
+3. 切换到 **「AI 配置」** 标签页，确认 AI 服务配置正确
+4. 选择要投递的平台（LinkedIn / Indeed）
+5. 点击 **「开始自动投递」**
+
+---
 
 ## 项目结构
 
@@ -85,25 +117,12 @@ src/
 │   ├── interfaces/            # 平台接口（JobPlatform）
 │   └── platforms/             # 平台适配器（LinkedIn, Indeed, Registry）
 ├── linkedin/                  # LinkedIn 平台逻辑
-│   ├── content.ts             # Content Script
-│   ├── externalJobs.ts        # 外部职位申请
-│   ├── selectors.ts           # DOM 选择器
-│   └── utils.ts               # 工具函数
 ├── indeed/                    # Indeed 平台逻辑
-│   ├── content.ts             # Content Script
-│   └── utils.ts               # 工具函数
 ├── lib/                       # 通用库
 │   ├── ai/                    # AI 服务抽象层
-│   │   ├── types.ts           # 类型定义
-│   │   ├── openai-provider.ts # OpenAI 兼容实现
-│   │   ├── provider-factory.ts# 提供商工厂
-│   │   └── config.ts          # 配置验证
 │   ├── persistence.ts         # Chrome Storage 持久化
 │   ├── dom-cache.ts           # DOM 查询缓存
-│   ├── concurrency.ts         # Mutex/Semaphore 并发控制
-│   ├── constants.ts           # UI 常量
-│   ├── platform-maps.ts       # 平台参数映射
-│   └── status-codes.ts        # 消息类型定义
+│   └── concurrency.ts         # Mutex/Semaphore 并发控制
 └── components/                # UI 组件
 ```
 
@@ -113,16 +132,16 @@ src/
 
 | 命令 | 说明 |
 |------|------|
-| `pnpm dev` | 启动开发服务器 |
-| `pnpm build` | 构建生产版本 |
-| `pnpm lint` | 代码检查 |
+| `pnpm dev` | 启动开发服务器（热更新） |
+| `pnpm build` | 构建生产版本到 `dist` 目录 |
+| `pnpm lint` | 运行 ESLint 代码检查 |
 
-### AI 配置
+### AI 配置方式
 
 支持两种配置方式：
 
 1. **环境变量**（构建时）：在 `.env` 文件中设置 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL_NAME`
-2. **插件界面**（运行时）：在扩展弹窗的「AI 配置」标签页中配置，数据仅存储在本地
+2. **插件界面**（运行时）：在扩展弹窗的「AI 配置」标签页中配置，数据仅存储在本地 Chrome Storage
 
 ### 架构设计
 
@@ -132,6 +151,24 @@ src/
 - **应用层** (`background/`)：消息路由和任务调度
 - **基础设施层** (`lib/`)：AI 抽象、持久化、并发控制
 - **表现层** (`linkedin/`, `indeed/`)：平台具体的 Content Script
+
+---
+
+## 常见问题
+
+**Q: 扩展加载后没有反应？**
+A: 检查 `.env` 文件是否正确配置了 `AI_API_KEY`，并重新运行 `pnpm build`。
+
+**Q: AI 填写的表单不准确？**
+A: 确保简历内容详细，或尝试使用更强的模型（如 gpt-4）。
+
+**Q: 如何查看扩展运行日志？**
+A: 在 LinkedIn/Indeed 页面按 F12 打开开发者工具，查看 Console 面板。
+
+**Q: 支持哪些招聘平台？**
+A: 目前支持 LinkedIn 和 Indeed，更多平台开发中。
+
+---
 
 ## 贡献者
 
