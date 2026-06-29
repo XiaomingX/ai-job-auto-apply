@@ -1,393 +1,379 @@
-# 架构分析与改进计划
+# 架构说明文档
 
-## 一、系统概述
+## 一、系统是干什么的？
 
-### 1.1 系统定位
+一句话：**帮你在 LinkedIn/Indeed 上自动投简历的 Chrome 扩展。**
 
-这是一个 Chrome 浏览器扩展，核心功能是**自动化职位申请**。系统通过 AI（Gemini）分析简历与职位的匹配度，自动在 LinkedIn、Indeed 等招聘平台上填写申请表单并投递。
+工作流程：
+1. 用户在扩展弹窗里选择求职档案、设置筛选条件
+2. 扩展打开招聘网站，搜索职位
+3. 对每个职位，AI 判断是否匹配简历
+4. 匹配的话，自动填写申请表单并提交
 
-### 1.2 核心业务流程
+---
+
+## 二、架构分层
 
 ```
-用户配置 → 选择档案 → 设置筛选条件 → 启动自动投递
-    ↓
-Background Service Worker
-    ↓
-打开招聘平台标签页 → Content Script 注入
-    ↓
-遍历职位列表 → AI 匹配判断 → 自动填写表单 → 提交申请
+┌─────────────────────────────────────────────────────────────┐
+│                      用户交互层                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │  App.tsx      │  │  弹窗 UI     │  │  Chrome Storage  │  │
+│  │  (React)      │  │  (Radix UI)  │  │  (配置持久化)     │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      应用层                                  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  background/index.ts (Service Worker 入口)            │  │
+│  │  background/message-router.ts (消息路由)              │  │
+│  │  background/tab-manager.ts (标签页管理)               │  │
+│  │  background/script-injector.ts (脚本注入)             │  │
+│  │  background/retry-handler.ts (重试处理)               │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      领域层                                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐    │
+│  │  模型        │  │  接口        │  │  平台适配器      │    │
+│  │  JobProfile  │  │  JobPlatform │  │  LinkedInPlatform│    │
+│  │  JobFilters  │  │  (契约)      │  │  IndeedPlatform  │    │
+│  │  WorkExp     │  │              │  │  PlatformRegistry│    │
+│  │  Education   │  │              │  │                  │    │
+│  └─────────────┘  └─────────────┘  └─────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      基础设施层                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐    │
+│  │  AI 抽象     │  │  并发控制    │  │  工具库          │    │
+│  │  Provider    │  │  Mutex      │  │  dom-cache       │    │
+│  │  Factory     │  │  Semaphore  │  │  persistence     │    │
+│  │  Config      │  │  TaskQueue  │  │  scroll-manager  │    │
+│  └─────────────┘  └─────────────┘  └─────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      平台实现层（Content Script）             │
+│  ┌──────────────────────┐  ┌──────────────────────┐        │
+│  │  linkedin/content.ts  │  │  indeed/content.ts   │        │
+│  │  linkedin/selectors.ts│  │  indeed/utils.ts     │        │
+│  │  linkedin/utils.ts    │  │                      │        │
+│  └──────────────────────┘  └──────────────────────┘        │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 二、DDD 视角下的架构分析
+## 三、核心模块说明
 
-### 2.1 识别限界上下文（Bounded Context）
+### 3.1 Background（后台服务）
 
-从第一性原理出发，这个系统的**核心领域**是「自动化求职」。通过分析代码，可以识别出以下限界上下文：
+**位置**：`src/background/`
 
+| 文件 | 干什么的 |
+|------|----------|
+| `index.ts` | Service Worker 入口，监听 Chrome 消息 |
+| `message-router.ts` | 消息路由，根据 MessageType 分发到不同处理函数 |
+| `tab-manager.ts` | 管理 Chrome 标签页的创建、关闭、数据清理 |
+| `script-injector.ts` | 向标签页注入 Content Script |
+| `retry-handler.ts` | 带超时的监听器注册、带重试的消息发送 |
+
+**关键流程**：
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    自动化求职系统                                  │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │  用户配置上下文  │    │  求职策略上下文  │    │  平台适配上下文  │      │
-│  │              │    │              │    │              │      │
-│  │ - 求职档案    │    │ - 筛选条件    │    │ - LinkedIn   │      │
-│  │ - 工作经历    │    │ - AI 匹配    │    │ - Indeed     │      │
-│  │ - 教育背景    │    │ - 申请限制    │    │ - (可扩展)    │      │
-│  └──────────────┘    └──────────────┘    └──────────────┘      │
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │  表单填写上下文  │    │  消息通信上下文  │    │  状态管理上下文  │      │
-│  │              │    │              │    │              │      │
-│  │ - 字段识别    │    │ - Chrome API │    │ - 申请进度    │      │
-│  │ - AI 填充    │    │ - 事件分发    │    │ - 错误处理    │      │
-│  │ - 表单提交    │    │ - 重试机制    │    │ - 持久化      │      │
-│  └──────────────┘    └──────────────┘    └──────────────┘      │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+用户点击"开始投递"
+  → App.tsx 发送 START_AUTO_APPLYING 消息
+  → message-router 接收并路由
+  → 打开 LinkedIn/Indeed 标签页
+  → 注入 Content Script
+  → 发送 START_JOB_SEARCH 消息
+  → Content Script 开始处理
 ```
 
-### 2.2 当前架构的精妙之处
+### 3.2 Domain（领域层）
 
-**1. Chrome Extension 架构选型正确**
+**位置**：`src/domain/`
 
-Manifest V3 的 Service Worker + Content Script 架构是正确的选择：
-- `background.ts` 作为 Service Worker 处理跨页面协调
-- Content Script 注入到招聘平台页面，直接操作 DOM
-- 通过 `chrome.runtime.sendMessage` 实现松耦合通信
-
-**2. 平台抽象的直觉**
-
-`linkedin/` 和 `indeed/` 目录的分离体现了对「平台适配」的直觉理解，每个平台有自己的：
-- `content.ts` — 业务逻辑
-- `selectors.ts` — DOM 选择器
-- `utils.ts` — 工具函数
-
-**3. AI 能力的解耦**
-
-AI 功能（Gemini API）被封装在 `lib/GeminiAi.ts`，与业务逻辑分离，便于替换 AI 服务。
-
----
-
-### 2.3 架构边界存在的问题
-
-**问题 1：领域模型缺失**
-
-当前的数据类型定义（`JobProfile`、`WorkExperience`、`Education`）直接嵌入在 `App.tsx` 中，没有独立的领域模型层。这意味着：
-- 类型定义无法被其他模块复用
-- 业务规则散落在各处
-- 无法进行领域验证
-
-**问题 2：平台适配层缺乏统一接口**
-
-LinkedIn 和 Indeed 的 Content Script 虽然分目录存放，但没有统一的接口定义。每个平台的实现方式不同，导致：
-- 新增平台时没有明确的契约
-- 无法进行平台间的统一测试
-- 业务逻辑与平台实现耦合
-
-**问题 3：Background Service Worker 职责过重**
-
-`background.ts` 承担了太多职责：
-- 消息路由
-- 标签页管理
-- URL 构建
-- 重试逻辑
-- 脚本注入
-
-这违反了单一职责原则，使得代码难以测试和维护。
-
-**问题 4：Content Script 中的全局状态**
-
-`linkedin/content.ts` 使用大量模块级变量（`jobDetails`、`aiResponse`、`resumeText` 等）管理状态，这带来：
-- 状态不可预测
-- 难以进行单元测试
-- 潜在的内存泄漏风险
-
-**问题 5：消息协议缺乏类型安全**
-
-`MessageType` 枚举虽然定义了消息类型，但消息体的结构没有统一定义，导致：
-- 消息格式不一致
-- 无法进行编译时检查
-- 调试困难
-
----
-
-## 三、改进计划
-
-### 3.1 架构分层改进
-
-目标架构：
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      展示层 (Presentation)                        │
-│  App.tsx / Components / Hooks                                    │
-│  职责：UI 渲染、用户交互、状态展示                                   │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                      应用层 (Application)                         │
-│  services/ / use-cases/                                          │
-│  职责：编排业务流程、协调领域对象                                     │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                      领域层 (Domain)                              │
-│  models/ / entities/ / value-objects/                            │
-│  职责：核心业务规则、领域模型、业务验证                                │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                      基础设施层 (Infrastructure)                   │
-│  platforms/ / storage/ / messaging/                              │
-│  职责：外部系统集成、Chrome API 封装、数据持久化                       │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 具体改进项
-
-#### 阶段 1：领域模型提取（低风险，高收益）
-
-**目标**：将领域类型从 UI 层独立出来
-
-**文件结构**：
-
-```
-src/
-├── domain/
-│   ├── models/
-│   │   ├── job-profile.ts      # 求职档案模型
-│   │   ├── work-experience.ts  # 工作经历模型
-│   │   ├── education.ts        # 教育背景模型
-│   │   └── job-filters.ts      # 筛选条件模型
-│   ├── value-objects/
-│   │   ├── salary-range.ts     # 薪资范围值对象
-│   │   └── date-range.ts       # 日期范围值对象
-│   └── interfaces/
-│       └── platform.ts         # 平台适配接口
-```
-
-**检查清单**：
-- [x] 创建 `src/domain/models/` 目录
-- [x] 提取 `JobProfile` 接口到独立文件
-- [x] 提取 `WorkExperience` 接口到独立文件
-- [x] 提取 `Education` 接口到独立文件
-- [x] 提取 `JobFilters` 接口到独立文件
-- [x] 更新 `App.tsx` 的导入路径
-- [x] 更新 `background.ts` 的导入路径（已添加类型注解）
-- [x] 更新 Content Script 的导入路径（已使用状态管理器）
-
-#### 阶段 2：平台适配接口抽象（中风险，高收益）
-
-**目标**：定义统一的平台适配接口
-
-**接口定义**：
-
+**核心接口 `JobPlatform`**：
 ```typescript
-// src/domain/interfaces/platform.ts
-export interface JobPlatform {
+interface JobPlatform {
   readonly name: string;
   readonly baseUrl: string;
-  
-  // 构建搜索 URL
-  buildSearchUrl(filters: JobFilters, jobDetails: JobProfile): string;
-  
-  // 解析职位列表
+  buildSearchUrl(filters: JobFilters, profile: JobProfile): string;
   parseJobList(document: Document): JobCard[];
-  
-  // 填写申请表单
   fillApplicationForm(form: HTMLFormElement, profile: JobProfile): Promise<void>;
-  
-  // 提交申请
   submitApplication(): Promise<boolean>;
 }
 ```
 
-**检查清单**：
-- [x] 定义 `JobPlatform` 接口
-- [x] 创建 `LinkedInPlatform` 实现
-- [x] 创建 `IndeedPlatform` 实现
-- [x] 重构 Content Script 使用平台接口
-- [x] 添加平台注册机制
+**平台注册表 `PlatformRegistry`**：
+- 管理所有已注册的平台适配器
+- 通过 `get(name)` 获取平台实例
+- 新增平台只需 `register(new Platform())`
 
-#### 阶段 3：Background Service Worker 拆分（中风险，中收益）
+**领域模型**：
+- `JobProfile`：用户求职档案（姓名、邮箱、简历、工作经历、教育背景）
+- `JobFilters`：筛选条件（经验等级、工作类型、发布日期等）
+- `WorkExperience`：工作经历
+- `Education`：教育背景
 
-**目标**：将 `background.ts` 拆分为多个职责单一的模块
+### 3.3 AI 抽象层
 
-**文件结构**：
-```
-src/
-├── background/
-│   ├── index.ts              # 入口，消息监听注册
-│   ├── message-router.ts     # 消息路由
-│   ├── tab-manager.ts        # 标签页管理
-│   ├── script-injector.ts    # 脚本注入
-│   └── retry-handler.ts      # 重试逻辑
-```
-
-**检查清单**：
-
-- [x] 创建 `src/background/` 目录
-- [x] 提取标签页管理逻辑到 `tab-manager.ts`
-- [x] 提取脚本注入逻辑到 `script-injector.ts`
-- [x] 提取重试逻辑到 `retry-handler.ts`
-- [x] 创建消息路由 `message-router.ts`
-- [x] 重构 `index.ts` 作为入口
-
-#### 阶段 4：状态管理改进（低风险，中收益）
-
-**目标**：将 Content Script 中的全局状态封装为状态机
-
-**状态定义**：
-
-```typescript
-// src/domain/state/application-state.ts
-type ApplicationState = 
-  | { status: 'idle' }
-  | { status: 'searching'; currentPage: number; processedCount: number }
-  | { status: 'applying'; currentJob: JobCard; progress: number }
-  | { status: 'completed'; totalApplied: number }
-  | { status: 'error'; error: Error; retryCount: number };
-```
-
-**检查清单**：
-
-- [x] 定义应用状态类型
-- [x] 创建状态管理器
-- [x] 重构 LinkedIn Content Script 使用状态机
-- [x] 重构 Indeed Content Script 使用状态机
-- [x] 添加状态持久化（可选）
-
-#### 阶段 5：消息协议类型化（低风险，低收益）
-
-**目标**：为 Chrome 消息通信添加类型安全
-
-**检查清单**：
-
-- [x] 定义每种消息类型的 payload 接口
-- [x] 创建类型安全的消息发送函数
-- [x] 创建类型安全的消息监听函数
-- [ ] 更新所有消息通信代码
-
-#### 阶段 6：AI 提供商抽象（中风险，高收益）
-
-**目标**：支持多种 AI 服务提供商，允许用户自定义配置
-
-**当前问题**：
-
-- 硬编码 Google Gemini SDK，无法切换其他 AI 服务
-- API Key 存储在环境变量中，用户无法在界面配置
-- 不支持国内用户常用的大模型服务（如通义千问、文心一言等）
-
-**配置接口设计**：
-
-```typescript
-// src/domain/interfaces/ai-provider.ts
-export interface AIProviderConfig {
-  baseUrl: string;      // API 基础地址
-  apiKey: string;       // API 密钥
-  modelName: string;    // 模型名称
-  maxTokens?: number;   // 最大输出 token 数
-  temperature?: number; // 温度参数
-}
-
-export interface AIProvider {
-  readonly name: string;
-  readonly config: AIProviderConfig;
-
-  // 发送消息并获取响应
-  sendMessage(prompt: string): Promise<string>;
-
-  // 验证配置是否有效
-  validateConfig(): Promise<boolean>;
-}
-```
-
-**支持的 API 格式**：
-
-```typescript
-// OpenAI 兼容格式（大多数国内大模型都支持）
-// POST {baseUrl}/v1/chat/completions
-// Headers: Authorization: Bearer {apiKey}
-// Body: { model: modelName, messages: [...] }
-
-// Anthropic 格式（通过 OpenAI 兼容层）
-// POST {baseUrl}/v1/messages
-// Headers: x-api-key: {apiKey}, anthropic-version: 2023-06-01
-// Body: { model: modelName, messages: [...] }
-```
-
-**文件结构**：
+**位置**：`src/lib/ai/`
 
 ```
-src/
-├── lib/
-│   ├── ai/
-│   │   ├── provider-factory.ts   # AI 提供商工厂
-│   │   ├── openai-provider.ts    # OpenAI 兼容格式实现
-│   │   ├── types.ts              # AI 相关类型定义
-│   │   └── config.ts             # AI 配置管理
-│   └── GeminiAi.ts              # 保留旧文件，逐步迁移
+AIProvider (接口)
+    │
+    └── OpenAICompatibleProvider (实现)
+            │
+            ├── sendMessage(prompt) → 调用 OpenAI 兼容 API
+            └── validateConfig() → 验证配置有效性
+
+ProviderFactory (工厂)
+    │
+    ├── create(config) → 创建提供商实例
+    ├── createDefault() → 使用环境变量创建
+    ├── loadConfig() → 从 Chrome Storage 加载配置
+    └── saveConfig() → 保存配置到 Chrome Storage
 ```
 
-**配置存储**：
+**支持的 AI 服务**（任何 OpenAI 兼容格式）：
+- OpenAI、Anthropic、DeepSeek、通义千问、智谱、小米 MiMo
 
-```typescript
-// 使用 Chrome Storage API 存储用户配置
-chrome.storage.sync.get(['aiConfig'], (result) => {
-  const config: AIProviderConfig = result.aiConfig || {
-    baseUrl: 'https://api.openai.com',
-    apiKey: '',
-    modelName: 'gpt-4',
-  };
-});
+### 3.4 并发控制
+
+**位置**：`src/lib/concurrency.ts`
+
+| 类 | 用途 |
+|----|------|
+| `Mutex` | 互斥锁，保证同一时间只有一个操作 |
+| `Semaphore` | 信号量，控制并发数量 |
+| `TaskQueue` | 任务队列，支持串行/并行执行 |
+
+**使用场景**：
+- `processLock`：防止重复启动申请流程
+- `globalLock`：全局互斥锁
+
+### 3.5 Content Script（平台实现）
+
+**位置**：`src/linkedin/` 和 `src/indeed/`
+
+这是真正干活的地方：
+- 监听 Background 发来的消息
+- 操作 DOM 解析职位列表
+- 调用 AI 判断是否匹配
+- 自动填写表单并提交
+
+**LinkedIn Content Script 核心流程**：
 ```
-
-**检查清单**：
-- [x] 创建 `src/lib/ai/` 目录
-- [x] 定义 `AIProviderConfig` 和 `AIProvider` 接口
-- [x] 实现 `OpenAICompatibleProvider` 类
-- [x] 创建 `ProviderFactory` 工厂类
-- [x] 在 App.tsx 添加 AI 配置界面
-- [x] 使用 Chrome Storage 存储配置
-- [x] 更新 `content.ts` 使用新的 AI 提供商接口
-- [x] 添加配置验证和错误处理
-- [x] 保留 Gemini 作为默认选项（向后兼容）
+收到 START_JOB_SEARCH 消息
+  → processJobListings()
+  → scrollToBottomSlowly() 加载所有职位
+  → 遍历 jobCards
+    → processJobCard()
+      → 点击职位卡片
+      → extractJobDetails() 提取职位信息
+      → checkJobDescriptionFit() AI 判断是否匹配
+      → 匹配则 applyToJob()
+        → handleEasyApply() 或 handleExternalApply()
+        → handleMultiPageForm() 多页表单处理
+        → fillFormWithAI() AI 填写表单
+```
 
 ---
 
-## 四、改进优先级矩阵
+## 四、依赖的三方组件
 
-| 改进项 | 风险 | 收益 | 优先级 | 预计工作量 |
-|--------|------|------|--------|-----------|
-| 领域模型提取 | 低 | 高 | P0 | 2-3 小时 |
-| AI 提供商抽象 | 中 | 高 | P1 | 4-6 小时 |
-| 平台适配接口 | 中 | 高 | P1 | 4-6 小时 |
-| Background 拆分 | 中 | 中 | P2 | 3-4 小时 |
-| 状态管理改进 | 低 | 中 | P2 | 3-4 小时 |
-| 消息协议类型化 | 低 | 低 | P3 | 2-3 小时 |
+| 组件 | 用途 | 版本 |
+|------|------|------|
+| React | UI 框架 | 18.x |
+| Vite | 构建工具 | 5.x |
+| TypeScript | 类型安全 | 5.x |
+| Tailwind CSS | 样式框架 | 3.x |
+| Radix UI | 无样式组件库 | 1.x |
+| Framer Motion | 动画 | 11.x |
+| canvas-confetti | 粒子特效 | 1.x |
+| pdf-parser-client-side | PDF 文本提取 | - |
+| lucide-react | 图标库 | - |
 
 ---
 
-## 五、不建议做的改动
+## 五、提示词工程说明
 
-以下改动在当前阶段**不建议**进行，因为成本大于收益：
+### 5.1 表单填写提示词
 
-1. **引入完整状态管理库**（如 Redux、Zustand）
-   - 当前状态简单，React useState 已足够
-   - 引入额外依赖增加复杂度
+**位置**：`src/linkedin/content.ts` 的 `fillFormField()` 函数
 
-2. **引入依赖注入框架**
-   - 项目规模不需要
-   - 增加学习成本
+**用途**：让 AI 根据表单字段信息生成填写值
 
-3. **过度抽象 AI 能力**
-   - 当前只用 Gemini，抽象无实际收益
-   - 等有第二个 AI 服务时再抽象
+**提示词结构**：
+```
+角色设定：AI 表单填写助手
+上下文：当前表单区域标题
+字段信息：名称、类型、标签、占位符、是否必填、可选值
+规则：
+  1. 只返回值，不解释
+  2. 地址字段返回逗号分隔的城市列表
+  3. 数字字段返回合理数值
+  4. 日期格式 MM/YYYY
+  5. 多选字段从选项中选择
+  6. ...
+```
 
-4. **引入完整的 ORM 或数据层**
-   - Chrome Storage API 已满足需求
-   - 当前数据结构简单
+### 5.2 职位匹配提示词
+
+**位置**：`src/linkedin/content.ts` 的 `checkJobDescriptionFit()` 函数
+
+**用途**：判断用户简历是否匹配职位要求
+
+**当前实现**：直接将简历文本和职位详情发给 AI，要求返回 "Yes" 或 "No"
+
+**问题**：提示词被截断（`Please respond with only "Yes"`），没有充分利用 AI 能力
+
+### 5.3 提示词改进建议
+
+1. **结构化输出**：要求 AI 返回 JSON 格式，包含匹配度评分和理由
+2. **角色设定**：添加"你是资深 HR"这样的角色设定
+3. **Few-shot 示例**：提供几个判断示例
+4. **中文优化**：当前提示词是英文，可改为中文以提高国内模型效果
+
+---
+
+## 六、核心能力常用方法入口
+
+### 6.1 启动自动投递
+
+```
+App.tsx: startAutoApplying()
+  → chrome.runtime.sendMessage(START_AUTO_APPLYING)
+  → background/message-router.ts: handleStartAutoApplying()
+  → openLinkedInJobsPage() / openIndeedJobsPage()
+```
+
+### 6.2 处理职位列表
+
+```
+linkedin/content.ts: processJobListings()
+  → scrollToBottomSlowly() 加载职位
+  → processJobCard() 处理单个职位
+  → checkJobDescriptionFit() AI 匹配
+  → applyToJob() 申请职位
+```
+
+### 6.3 AI 填写表单
+
+```
+linkedin/content.ts: fillFormWithAI()
+  → extractFormFields() 提取表单字段
+  → fillFormField() 逐个字段调用 AI
+  → queryLLM() 发送 AI 请求
+```
+
+### 6.4 AI 请求
+
+```
+lib/ai/openai-provider.ts: sendMessage()
+  → fetch(url, { method: 'POST', ... })
+  → 解析 ChatCompletionResponse
+  → 返回 choices[0].message.content
+```
+
+---
+
+## 七、常用函数速查表
+
+| 函数 | 文件 | 作用 |
+|------|------|------|
+| `routeMessage()` | background/message-router.ts | 消息路由分发 |
+| `openLinkedInJobsPage()` | background/message-router.ts | 打开 LinkedIn 搜索页 |
+| `addListenerWithTimeout()` | background/retry-handler.ts | 带超时的监听器 |
+| `sendMessageWithRetry()` | background/retry-handler.ts | 带重试的消息发送 |
+| `processJobListings()` | linkedin/content.ts | 处理职位列表主流程 |
+| `processJobCard()` | linkedin/content.ts | 处理单个职位卡片 |
+| `checkJobDescriptionFit()` | linkedin/content.ts | AI 判断职位匹配 |
+| `fillFormWithAI()` | linkedin/content.ts | AI 填写表单 |
+| `queryLLM()` | linkedin/content.ts | 带超时的 AI 查询 |
+| `extractFormFields()` | linkedin/content.ts | 提取表单字段 |
+| `Mutex.acquire()` | lib/concurrency.ts | 获取锁 |
+| `Mutex.release()` | lib/concurrency.ts | 释放锁 |
+| `ProviderFactory.create()` | lib/ai/provider-factory.ts | 创建 AI 提供商 |
+| `PlatformRegistry.get()` | domain/platforms/platform-registry.ts | 获取平台适配器 |
+
+---
+
+## 八、使用用例
+
+### 用例 1：添加新招聘平台
+
+```typescript
+// 1. 实现 JobPlatform 接口
+class GlassdoorPlatform implements JobPlatform {
+  readonly name = 'Glassdoor';
+  readonly baseUrl = 'https://www.glassdoor.com';
+
+  buildSearchUrl(filters, profile) { /* ... */ }
+  parseJobList(document) { /* ... */ }
+  fillApplicationForm(form, profile) { /* ... */ }
+  submitApplication() { /* ... */ }
+}
+
+// 2. 注册到平台注册表
+platformRegistry.register(new GlassdoorPlatform());
+
+// 3. 在 message-router 中添加处理逻辑
+// 4. 创建 content.ts 处理 Glassdoor 页面
+```
+
+### 用例 2：切换 AI 服务
+
+```typescript
+// 方式 1：在扩展弹窗的"AI 配置"标签页中修改
+// 方式 2：修改 .env 文件
+AI_BASE_URL=https://api.deepseek.com
+AI_API_KEY=sk-xxx
+AI_MODEL_NAME=deepseek-chat
+```
+
+### 用例 3：调试 AI 请求
+
+```typescript
+// 在 linkedin/content.ts 的 queryLLM() 中添加日志
+console.log('发送给 AI 的提示词:', prompt);
+console.log('AI 返回:', response);
+```
+
+---
+
+## 九、数据流图
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  用户操作    │────▶│  App.tsx    │────▶│  Background │
+│  (弹窗 UI)  │     │  (React)    │     │  (Service   │
+│             │◀────│             │◀────│   Worker)   │
+└─────────────┘     └─────────────┘     └──────┬──────┘
+                                               │
+                    ┌──────────────────────────┼──────────────────────────┐
+                    │                          │                          │
+                    ▼                          ▼                          ▼
+             ┌─────────────┐          ┌─────────────┐          ┌─────────────┐
+             │  LinkedIn   │          │   Indeed    │          │   未来平台   │
+             │  Content    │          │   Content   │          │   Content   │
+             │  Script     │          │   Script    │          │   Script    │
+             └──────┬──────┘          └──────┬──────┘          └──────┬──────┘
+                    │                          │                          │
+                    └──────────────────────────┼──────────────────────────┘
+                                               │
+                                               ▼
+                                     ┌─────────────┐
+                                     │  AI 服务     │
+                                     │  (OpenAI    │
+                                     │   兼容)     │
+                                     └─────────────┘
+```

@@ -9,6 +9,8 @@ class IndeedApplicationStateManager {
         currentPage: 1,
         isProcessing: false,
     };
+    private saveTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly SAVE_DELAY = 1000; // 1 秒防抖
 
     reset() {
         this.state = {
@@ -25,12 +27,32 @@ class IndeedApplicationStateManager {
 
     update(partial: Partial<typeof this.state>) {
         this.state = { ...this.state, ...partial };
-        this.saveToPersistence();
+        this.debouncedSave();
     }
 
     incrementApplicationCount() {
         this.state.applicationCount++;
-        this.saveToPersistence();
+        this.debouncedSave();
+    }
+
+    // 防抖保存
+    private debouncedSave() {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+        }
+        this.saveTimer = setTimeout(() => {
+            this.saveToPersistence();
+            this.saveTimer = null;
+        }, this.SAVE_DELAY);
+    }
+
+    // 立即保存（用于关键操作）
+    async flush(): Promise<void> {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+        await this.saveToPersistence();
     }
 
     // 保存到本地持久化存储

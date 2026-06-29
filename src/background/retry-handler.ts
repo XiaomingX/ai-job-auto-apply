@@ -79,7 +79,10 @@ export async function sendMessageWithRetry(
         } catch (error) {
             console.error(`第 ${i + 1} 次发送失败: ${error}`);
             if (i < maxRetries - 1) {
-                await delay(retryDelay);
+                // 指数退避 + 随机抖动
+                const backoff = retryDelay * Math.pow(2, i);
+                const jitter = Math.random() * retryDelay * 0.5;
+                await delay(backoff + jitter);
             } else {
                 throw new Error(`发送消息失败，已重试 ${maxRetries} 次`);
             }

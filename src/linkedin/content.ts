@@ -37,6 +37,35 @@ interface FormField {
 // AI 请求超时时间（毫秒）
 const AI_REQUEST_TIMEOUT = 30000;
 
+/**
+ * 清理用户输入，防止提示词注入
+ *
+ * 移除或转义可能被解释为提示词指令的内容
+ */
+function sanitizeInput(input: string): string {
+    if (!input) return '';
+
+    // 移除常见的提示词注入模式
+    return input
+        .replace(/```[\s\S]*?```/g, '') // 移除代码块
+        .replace(/\[INST\]/gi, '')       // 移除 Llama 指令标记
+        .replace(/\[\/INST\]/gi, '')
+        .replace(/<<SYS>>/gi, '')        // 移除系统提示标记
+        .replace(/<\/SYS>>/gi, '')
+        .replace(/Human:/gi, '')         // 移除角色标记
+        .replace(/Assistant:/gi, '')
+        .replace(/System:/gi, '')
+        .replace(/\n{3,}/g, '\n\n')      // 压缩多余空行
+        .trim();
+}
+
+// 简历文本缓存（避免重复下载和解析）
+const resumeCache = new Map<string, string>();
+
+// 表单字段缓存（避免频繁 DOM 查询）
+let formFieldsCache: { fields: Record<string, FormField>; timestamp: number } | null = null;
+const FORM_FIELDS_CACHE_TTL = 2000; // 2 秒缓存
+
 // 状态管理器（替代全局变量）
 class ApplicationStateManager {
     private state = {
@@ -50,6 +79,8 @@ class ApplicationStateManager {
         workExperiences: [] as any[],
         educations: [] as any[],
     };
+    private saveTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly SAVE_DELAY = 1000; // 1 秒防抖
 
     reset() {
         this.state = {
@@ -71,7 +102,27 @@ class ApplicationStateManager {
 
     update(partial: Partial<typeof this.state>) {
         this.state = { ...this.state, ...partial };
-        this.saveToPersistence();
+        this.debouncedSave();
+    }
+
+    // 防抖保存
+    private debouncedSave() {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+        }
+        this.saveTimer = setTimeout(() => {
+            this.saveToPersistence();
+            this.saveTimer = null;
+        }, this.SAVE_DELAY);
+    }
+
+    // 立即保存（用于关键操作）
+    async flush(): Promise<void> {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+        await this.saveToPersistence();
     }
 
     // 保存到本地持久化存储
@@ -166,7 +217,12 @@ async function initAIProvider(): Promise<void> {
       return;
     }
 
-    await processLock.acquire();
+    try {
+      await processLock.acquire(30000); // 30 秒超时
+    } catch (error) {
+      console.error('获取锁超时:', error);
+      return;
+    }
 
     try {
       let processedCount = 0;
@@ -589,6 +645,11 @@ async function handleExternalApply() {
     }
 
 function extractFormFields(): Record<string, FormField> {
+    // 检查缓存
+    if (formFieldsCache && Date.now() - formFieldsCache.timestamp < FORM_FIELDS_CACHE_TTL) {
+        return formFieldsCache.fields;
+    }
+
     const formFields: Record<string, FormField> = {};
   
     // Extract select fields (multiple choice)
@@ -683,7 +744,10 @@ function extractFormFields(): Record<string, FormField> {
         element: resumeUploadField
       };
     }
-  
+
+    // 更新缓存
+    formFieldsCache = { fields: formFields, timestamp: Date.now() };
+
     return formFields;
   }
 
@@ -1088,17 +1152,17 @@ async function fillFormField(fieldName: string, fieldInfo: any, _jobDetails: Job
     console.log("SectionTitle", sectionTitle);
 
     const prompt = `
-    You are an AI assistant designed to accurately fill out job application forms based on my information provided earlier 
-  
-    Current section: "${sectionTitle}"
+    You are an AI assistant designed to accurately fill out job application forms based on my information provided earlier
+
+    Current section: "${sanitizeInput(sectionTitle)}"
 
     Field details:
-    - Name: ${fieldName}
-    - Type: ${fieldInfo.type}
-    - Label: ${fieldInfo.label}
-    - Placeholder: ${fieldInfo.placeholder}
+    - Name: ${sanitizeInput(fieldName)}
+    - Type: ${sanitizeInput(fieldInfo.type)}
+    - Label: ${sanitizeInput(fieldInfo.label)}
+    - Placeholder: ${sanitizeInput(fieldInfo.placeholder)}
     - Required: ${fieldInfo.required}
-    - Options: ${fieldInfo.options ? fieldInfo.options.join(', ') : 'N/A'}
+    - Options: ${fieldInfo.options ? fieldInfo.options.map((o: string) => sanitizeInput(o)).join(', ') : 'N/A'}
 
     Please if any terms and condition area asked it should be true
     Give Answer Based on the formFields, types, label, placeholder and options, section Title, 
@@ -1553,7 +1617,14 @@ async function checkJobDescriptionFit(resumeUrl: string): Promise<boolean> {
             await initAIProvider();
         }
 
-        const response = await aiProvider.sendMessage(inputPrompt);
+        // 使用带超时的 AI 调用
+        const response = await Promise.race([
+            aiProvider.sendMessage(inputPrompt),
+            new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error('AI 请求超时')), AI_REQUEST_TIMEOUT);
+            }),
+        ]);
+
         console.log("API Response:", response);
         const trimmedResponse = response.trim();
         console.log("Parsed Response:", trimmedResponse);
@@ -1566,15 +1637,25 @@ async function checkJobDescriptionFit(resumeUrl: string): Promise<boolean> {
             return false;
         }
     } catch (error) {
-        console.error("Error sending message to AI API:", error);
+        errorReporter.report('checkJobDescriptionFit', error as Error, true);
         return false;
     }
 }
 
 async function processResume(resumeUrl: string): Promise<void> {
+    // 检查缓存
+    const cached = resumeCache.get(resumeUrl);
+    if (cached) {
+        console.log("使用缓存的简历文本");
+        appState.update({ resumeText: cached });
+        return;
+    }
+
     try {
         const pdfData = await downloadPdf(resumeUrl);
         const text = await extractTextFromPdf(pdfData);
+        // 存入缓存
+        resumeCache.set(resumeUrl, text);
         appState.update({ resumeText: text });
         console.log("提取的简历文本:", text);
     } catch (error) {

@@ -20,7 +20,7 @@ AI 自动投简历是一款 Chrome 浏览器扩展，借助人工智能自动筛
 - **AI 智能匹配**：根据简历和职位描述自动判断是否申请
 - **一键投递**：自动化申请流程，无需手动操作
 - **多平台支持**：LinkedIn Easy Apply、Indeed（更多平台开发中）
-- **多 AI 提供商**：支持 OpenAI、Anthropic、通义千问、文心一言、智谱、DeepSeek 等 OpenAI 兼容格式
+- **多 AI 提供商**：支持 OpenAI、Anthropic、通义千问、智谱、DeepSeek、小米 MiMo 等 OpenAI 兼容格式
 - **本地持久化**：申请状态自动保存到 Chrome 本地存储
 - **并发控制**：Mutex/Semaphore 机制防止重复申请
 - **错误恢复**：自动重试和错误报告机制
@@ -68,11 +68,12 @@ AI_MODEL_NAME=gpt-4
 >
 > | 服务 | API 地址 | 模型示例 |
 > |------|----------|----------|
-> | OpenAI | `https://api.openai.com` | `gpt-4`、`gpt-4o` |
-> | DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
-> | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
-> | 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `glm-4` |
-> | Anthropic | `https://api.anthropic.com/v1` | `claude-3-sonnet` |
+> | OpenAI | `https://api.openai.com` | `gpt-4o`、`gpt-4-turbo` |
+> | Anthropic | `https://api.anthropic.com/v1` | `claude-sonnet-4-6`、`claude-haiku-4-5` |
+> | DeepSeek | `https://api.deepseek.com` | `deepseek-chat`、`deepseek-coder` |
+> | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus`、`qwen-turbo` |
+> | 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `glm-4`、`glm-4-flash` |
+> | 小米 MiMo | `https://api.mimo.xiaomi.com/v1` | `mimo-v2.5-pro` |
 
 ### 第四步：构建扩展
 
